@@ -1,4 +1,6 @@
 #include "recv_install_snapshot.h"
+#include <sqlite3.h>
+#include <stdio.h>
 
 #include "../tracing.h"
 #include "assert.h"
@@ -9,6 +11,7 @@
 #include "replication.h"
 
 #include "../lib/sm.h"
+#include "src/raft.h"
 
 /**
  * =Overview
@@ -89,6 +92,14 @@ struct raft_install_snapshot_cp_result {
 	int version;
 	pageno_t last_known_page_no; /* used for retries and message losses */
 	int result;
+};
+
+struct snapshot_state {
+	struct sm sm;
+	raft_id id;
+	sqlite3 *db;
+	sqlite3_stmt *stmt;
+	struct raft *r;
 };
 
 /**
@@ -324,30 +335,178 @@ static const struct sm_conf leader_states[LS_NR] = {
 		.name = "online",
 		.allowed = BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
 	},
-/*	[PS_DRAINING] = {
-	    .name = "draining",
-	    .allowed = BITS(PS_DRAINING)
-		     | BITS(PS_NOTHING)
-		     | BITS(PS_BARRIER),
+	[LS_FOLLOWER_NEEDS_SNAPSHOT] = {
+		.flags = 0,
+		.name = "needs_snapshot",
+		.allowed = BITS(LS_FOLLOWER_WAS_NOTIFIED),
 	},
-*/
+	[LS_FOLLOWER_WAS_NOTIFIED] = {
+		.flags = 0,
+		.name = "follower_notified",
+		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+	},
+	[LS_SIGNATURES_CALC_STARTED] = {
+		.flags = 0,
+		.name = "signature_calc_started",
+		.allowed = BITS(LS_SNAPSHOT_INSTALLATION_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+	},
+	[LS_SNAPSHOT_INSTALLATION_STARTED] = {
+		.flags = 0,
+		.name = "installation_started",
+		.allowed = BITS(LS_SNAPSHOT_CHUNCK_SENT)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+	},
+	[LS_SNAPSHOT_CHUNCK_SENT] = {
+		.flags = 0,
+		.name = "chuck_sent",
+		.allowed = BITS(LS_SNAPSHOT_DONE_SENT)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+	},
+	[LS_SNAPSHOT_DONE_SENT] = {
+		.flags = 0,
+		.name = "done_send",
+		.allowed = BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+	},
 };
+
+static bool log_index_not_found(struct raft *r, raft_index follower_index)
+{
+	return follower_index < logLastIndex(r->log) &&
+							logGet(r->log, follower_index) == NULL;
+}
+
+static int insert_checksum(sqlite3_stmt *stmt, int checksum, int pageno) {
+	int rv;
+
+	rv = sqlite3_bind_int(stmt, 0, checksum);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_bind_int(stmt, 1, pageno);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_step(stmt);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_reset(stmt);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	return SQLITE_OK;
+}
 
 __attribute__((unused)) static void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
-	(void) leader;
-	(void) msg;
-	(void) leader_states;
-	//switch (sm_state(leader)) {
-	//}
+	int rv;
+	(void)leader_states;
+
+	assert(leader != NULL);
+	assert(msg != NULL);
+	struct snapshot_state *snapshot_sm = CONTAINER_OF(leader, struct snapshot_state, sm);
+	struct raft *r = snapshot_sm->r;
+
+	switch (sm_state(leader)) {
+        case LS_FOLLOWER_ONLINE:
+			switch (msg->type) {
+				case RAFT_IO_APPEND_ENTRIES:
+					raft_index follower_index = msg->append_entries_result.last_log_index;
+					// assert(follower_index >= 0);
+					// Follower needs an entry which is not on the Raft log anymore.
+					if (log_index_not_found(r, follower_index)) {
+						sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
+						// TODO send message here?
+					}
+					// TODO check that entry is in wal (I need the `entry` struct here to access the field).
+					// mxFrame: number of valid and committed frames in the WAL.
+					// nPage: size of the database in pages.
+					// nBackfill: Number of WAL frames that have already been backfilled into the database by prior checkpoints
+				default:
+					// TODO Log?
+					break;
+				}
+            break;
+        case LS_FOLLOWER_WAS_NOTIFIED:
+			switch (msg->type) {
+				case RAFT_IO_SIGNATURE_RESULT:
+					PRE(snapshot_sm->db == NULL);
+
+					char db_filename[30];
+					char *err_msg;
+					sprintf(db_filename, "ht-%lld", snapshot_sm->id);
+					rv = sqlite3_open_v2(db_filename, &snapshot_sm->db, 0, "unix");
+					assert(rv == SQLITE_OK);
+ 					rv = sqlite3_exec(snapshot_sm->db, "CREATE TABLE map (checksum INTEGER NOT NULL, pageno INTEGER NOT NULL UNIQUE);", NULL, NULL, &err_msg);
+					assert(rv == SQLITE_OK);
+ 					rv = sqlite3_exec(snapshot_sm->db, "CREATE INDEX map_idx on map(checksum);", NULL, NULL, &err_msg);
+					assert(rv == SQLITE_OK);
+					rv = sqlite3_prepare_v2(snapshot_sm->db, "INSERT OR IGNORE INTO map VALUES (?, ?);", -1, &snapshot_sm->stmt, NULL);
+					assert(rv == SQLITE_OK);
+					rv = insert_checksum(snapshot_sm->stmt, 0/*checksum*/, 0/*pageno*/);
+					assert(rv == SQLITE_OK);
+					sm_move(leader, LS_SIGNATURES_CALC_STARTED);
+					break;
+			}
+            break;
+        case LS_SIGNATURES_CALC_STARTED:
+			switch (msg->type) {
+				case RAFT_IO_SIGNATURE_RESULT:
+					PRE(snapshot_sm->db != NULL);
+					PRE(snapshot_sm->stmt != NULL);
+
+					rv = insert_checksum(snapshot_sm->stmt, 0/*checksum*/, 0/*pageno*/);
+					assert(rv == SQLITE_OK);
+					// TODO Should we send the reply from here? Who's responsibility is it?
+					break;
+			}
+			break;
+	}
 }
 
-__attribute__((unused)) static bool leader_invariant(const struct sm *m, int prev_state)
+int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id) {
+	for (int i = 0; i < (int)leader_state->n_snapshot_sms; i++) {
+		if (leader_state->snapshot_sms[i].id == id) {
+			return i;
+		}
+	}
+	return -1;
+}
+
+__attribute__((unused)) static bool leader_invariant(const struct sm *sm, int prev_state)
 {
-	(void) m;
 	(void) prev_state;
-	//pool_impl_t *pi = CONTAINER_OF(m, pool_impl_t, planner_sm);
-	return true;
+
+	struct snapshot_state *snapshot_sm = CONTAINER_OF(sm, struct snapshot_state, sm);
+	struct raft *r = snapshot_sm->r;
+
+	// TODO I think this should not happen here because we should only be
+	// checking the invariant of the state machine and not for all of them but
+	// I am not sure.
+	CHECK(r->state == RAFT_LEADER);
+	unsigned n_replicating_nodes = 0;
+	for (unsigned i = 0; i < r->configuration.n; i++) {
+		struct raft_server server = r->configuration.servers[i];
+		if (server.role == RAFT_STANDBY || server.role == RAFT_VOTER) {
+			CHECK(index_snapshot_sm(&r->leader_state, server.id));
+			n_replicating_nodes++;
+		}
+	}
+	CHECK(r->leader_state.n_snapshot_sms == n_replicating_nodes);
+
+	// State transitions.
+	CHECK(
+		ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+			prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
+		ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+			prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
+		ERGO(sm_state(sm) == LS_SIGNATURES_CALC_STARTED,
+			prev_state == LS_FOLLOWER_WAS_NOTIFIED) &&
+		ERGO(sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED,
+			prev_state == LS_SIGNATURES_CALC_STARTED) &&
+		ERGO(sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT,
+			prev_state == LS_SNAPSHOT_INSTALLATION_STARTED) &&
+		ERGO(sm_state(sm) == LS_SNAPSHOT_DONE_SENT,
+			prev_state == LS_SNAPSHOT_CHUNCK_SENT)
+	);
 }
 
 static void installSnapshotSendCb(struct raft_io_send *req, int status)
