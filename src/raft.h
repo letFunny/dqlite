@@ -315,6 +315,70 @@ struct raft_timeout_now
 };
 #define RAFT_TIMEOUT_NOW_VERSION 0
 
+typedef unsigned int checksum_t;
+typedef unsigned long int pageno_t;
+
+struct page_checksum_t {
+	pageno_t   page_no;
+	checksum_t checksum;
+};
+
+struct raft_install_snapshot_result {
+	int version;
+
+	const char *db;
+};
+
+struct raft_signature {
+	int version;
+
+	struct page_checksum_t *cs;
+	unsigned int cs_nr;
+	unsigned int cs_page_no;
+	const char *db;
+	int done;
+};
+
+struct raft_signature_result {
+	int version;
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	int result;
+};
+
+struct page_from_to {
+	pageno_t from;
+	pageno_t to;
+};
+
+struct raft_install_snapshot_mv {
+	int version;
+
+	struct page_from_to *mv;
+	unsigned int mv_nr;
+	const char *db;
+};
+
+struct raft_install_snapshot_mv_result {
+	int version;
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	int result;
+};
+
+struct raft_install_snapshot_cp {
+	int version;
+
+	const char *db;
+	pageno_t page_no;
+	struct raft_buffer page_data;
+};
+
+struct raft_install_snapshot_cp_result {
+	int version;
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	int result;
+};
+
+
 /**
  * Type codes for RPC messages.
  */
@@ -325,6 +389,7 @@ enum {
 	RAFT_IO_REQUEST_VOTE_RESULT,
 	RAFT_IO_INSTALL_SNAPSHOT,
 	RAFT_IO_TIMEOUT_NOW,
+	RAFT_IO_SIGNATURE,
 	RAFT_IO_SIGNATURE_RESULT,
 };
 
@@ -368,6 +433,9 @@ struct raft_message
 		struct raft_append_entries_result append_entries_result;
 		struct raft_install_snapshot install_snapshot;
 		struct raft_timeout_now timeout_now;
+		struct raft_install_snapshot_result install_snapshot_result;
+		struct raft_signature signature;
+		struct raft_signature_result signature_result;
 	};
 };
 
@@ -649,7 +717,8 @@ struct raft_follower_state {
 	uint64_t append_in_flight_count;
 	uint64_t reserved[7]; /* Future use */
 	struct sm *snapshot_sm; /* Follower's state machine used for snapshots. */
-}
+};
+
 struct raft_candidate_state {
 	unsigned
 		randomized_election_timeout; /* Timer expiration. */

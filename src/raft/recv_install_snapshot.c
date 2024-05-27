@@ -1,4 +1,3 @@
-#include "recv_install_snapshot.h"
 #include <sqlite3.h>
 #include <stdio.h>
 
@@ -12,6 +11,7 @@
 
 #include "../lib/sm.h"
 #include "src/raft.h"
+#include "src/raft/recv_install_snapshot.h"
 
 /**
  * =Overview
@@ -36,71 +36,6 @@
  * provides an efficient way to insert and lookup records
  * corresponding to the checksums and page numbers.
  */
-
-typedef unsigned int checksum_t;
-typedef unsigned long int pageno_t;
-
-struct page_checksum_t {
-	pageno_t   page_no;
-	checksum_t checksum;
-};
-
-struct raft_signature {
-	int version;
-
-	struct page_checksum_t *cs;
-	unsigned int cs_nr;
-	unsigned int cs_page_no;
-	const char *db;
-	int done;
-};
-
-struct raft_signature_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
-struct page_from_to {
-	pageno_t from;
-	pageno_t to;
-};
-
-struct raft_install_snapshot_mv {
-	int version;
-
-	struct page_from_to *mv;
-	unsigned int mv_nr;
-	const char *db;
-};
-
-struct raft_install_snapshot_mv_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
-struct raft_install_snapshot_cp {
-	int version;
-
-	const char *db;
-	pageno_t page_no;
-	struct raft_buffer page_data;
-};
-
-struct raft_install_snapshot_cp_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
-struct snapshot_state {
-	struct sm sm;
-	raft_id id;
-	sqlite3 *db;
-	sqlite3_stmt *stmt;
-	struct raft *r;
-};
 
 /**
  * =Operation
@@ -301,20 +236,22 @@ static const struct sm_conf follower_states[FS_NR] = {
 */
 };
 
- __attribute__((unused)) static void follower_tick(struct sm *follower, const struct raft_message *msg)
+__attribute__((unused)) void follower_tick(struct sm *follower,
+					   const struct raft_message *msg)
 {
-	(void) follower;
-	(void) msg;
-	(void) follower_states;
-	//switch (sm_state(follower)) {
-	//}
+	(void)follower;
+	(void)msg;
+	(void)follower_states;
+	// switch (sm_state(follower)) {
+	// }
 }
 
-__attribute__((unused)) static bool follower_invariant(const struct sm *m, int prev_state)
+__attribute__((unused)) static bool follower_invariant(const struct sm *m,
+						       int prev_state)
 {
-	(void) m;
-	(void) prev_state;
-	//pool_impl_t *pi = CONTAINER_OF(m, pool_impl_t, planner_sm);
+	(void)m;
+	(void)prev_state;
+	// pool_impl_t *pi = CONTAINER_OF(m, pool_impl_t, planner_sm);
 	return true;
 }
 
@@ -370,99 +307,181 @@ static const struct sm_conf leader_states[LS_NR] = {
 static bool log_index_not_found(struct raft *r, raft_index follower_index)
 {
 	return follower_index < logLastIndex(r->log) &&
-							logGet(r->log, follower_index) == NULL;
+	       logGet(r->log, follower_index) == NULL;
 }
 
-static int insert_checksum(sqlite3_stmt *stmt, int checksum, int pageno) {
+struct insert_checksum_data {
+	sqlite3_stmt *stmt;
+	struct page_checksum_t *cs;
+	unsigned int cs_nr;
+};
+
+static int insert_checksums(struct raft_io_async_work *req)
+{
 	int rv;
 
-	rv = sqlite3_bind_int(stmt, 0, checksum);
-	if (rv != SQLITE_OK) {
-		return rv;
-	}
-	rv = sqlite3_bind_int(stmt, 1, pageno);
-	if (rv != SQLITE_OK) {
-		return rv;
-	}
-	rv = sqlite3_step(stmt);
-	if (rv != SQLITE_OK) {
-		return rv;
-	}
-	rv = sqlite3_reset(stmt);
-	if (rv != SQLITE_OK) {
-		return rv;
+	struct insert_checksum_data *data = (struct insert_checksum_data *)req;
+	for (unsigned int i = 0; i < data->cs_nr; i++) {
+		rv = sqlite3_bind_int(data->stmt, 0, (int)data->cs[i].checksum);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
+		rv = sqlite3_bind_int(data->stmt, 1, (int)data->cs[i].page_no);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
+		rv = sqlite3_step(data->stmt);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
+		rv = sqlite3_reset(data->stmt);
+		if (rv != SQLITE_OK) {
+			return rv;
+		}
 	}
 	return SQLITE_OK;
 }
 
-__attribute__((unused)) static void leader_tick(struct sm *leader, const struct raft_message *msg)
+static void async_insert_checksums(struct snapshot_state *state,
+				   struct page_checksum_t *cs,
+				   unsigned int cs_nr)
+{
+	struct insert_checksum_data data = {
+		.stmt = state->stmt,
+		.cs = cs,
+		.cs_nr = cs_nr,
+	};
+	struct raft_io_async_work work = {
+		.work = insert_checksums,
+		.data = &data,
+	};
+	state->r->io->async_work(state->r->io, &work, NULL);
+}
+
+static int create_ht_db_and_stmt(struct raft_io_async_work *req)
+{
+	char db_filename[30];
+	char *err_msg;
+	int rv;
+
+	struct snapshot_state *state = (struct snapshot_state *)req->data;
+	sprintf(db_filename, "ht-%lld", state->id);
+	rv = sqlite3_open_v2(db_filename, &state->db, 0, "unix");
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_exec(state->db,
+			  "CREATE TABLE map (checksum INTEGER NOT NULL, pageno "
+			  "INTEGER NOT NULL UNIQUE);",
+			  NULL, NULL, &err_msg);
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_exec(state->db, "CREATE INDEX map_idx on map(checksum);",
+			  NULL, NULL, &err_msg);
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_prepare_v2(state->db,
+				"INSERT OR IGNORE INTO map VALUES (?, ?);", -1,
+				&state->stmt, NULL);
+	assert(rv == SQLITE_OK);
+	return SQLITE_OK;
+}
+
+static void async_create_ht_db_and_stmt(struct snapshot_state *state)
+{
+	struct raft_io_async_work work = {
+		.work = create_ht_db_and_stmt,
+		.data = state,
+	};
+	state->r->io->async_work(state->r->io, &work, NULL);
+}
+
+bool is_main_thread(void)
+{
+	// TODO: thread local storage.
+	return true;
+}
+
+void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
 	int rv;
 	(void)leader_states;
 
 	assert(leader != NULL);
 	assert(msg != NULL);
-	struct snapshot_state *snapshot_sm = CONTAINER_OF(leader, struct snapshot_state, sm);
-	struct raft *r = snapshot_sm->r;
 
+	struct snapshot_state *snapshot_state =
+		CONTAINER_OF(leader, struct snapshot_state, sm);
+	struct raft *r = snapshot_state->r;
+	assert(snapshot_state != NULL && r != NULL);
+
+	PRE(is_main_thread());
+	// TODO think about callsite of this function (triggers: e.g. message
+	// recv, timeouts).
 	switch (sm_state(leader)) {
-        case LS_FOLLOWER_ONLINE:
-			switch (msg->type) {
-				case RAFT_IO_APPEND_ENTRIES:
-					raft_index follower_index = msg->append_entries_result.last_log_index;
-					// assert(follower_index >= 0);
-					// Follower needs an entry which is not on the Raft log anymore.
-					if (log_index_not_found(r, follower_index)) {
-						sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
-						// TODO send message here?
-					}
-					// TODO check that entry is in wal (I need the `entry` struct here to access the field).
-					// mxFrame: number of valid and committed frames in the WAL.
-					// nPage: size of the database in pages.
-					// nBackfill: Number of WAL frames that have already been backfilled into the database by prior checkpoints
-				default:
-					// TODO Log?
-					break;
-				}
-            break;
-        case LS_FOLLOWER_WAS_NOTIFIED:
-			switch (msg->type) {
-				case RAFT_IO_SIGNATURE_RESULT:
-					PRE(snapshot_sm->db == NULL);
-
-					char db_filename[30];
-					char *err_msg;
-					sprintf(db_filename, "ht-%lld", snapshot_sm->id);
-					rv = sqlite3_open_v2(db_filename, &snapshot_sm->db, 0, "unix");
-					assert(rv == SQLITE_OK);
- 					rv = sqlite3_exec(snapshot_sm->db, "CREATE TABLE map (checksum INTEGER NOT NULL, pageno INTEGER NOT NULL UNIQUE);", NULL, NULL, &err_msg);
-					assert(rv == SQLITE_OK);
- 					rv = sqlite3_exec(snapshot_sm->db, "CREATE INDEX map_idx on map(checksum);", NULL, NULL, &err_msg);
-					assert(rv == SQLITE_OK);
-					rv = sqlite3_prepare_v2(snapshot_sm->db, "INSERT OR IGNORE INTO map VALUES (?, ?);", -1, &snapshot_sm->stmt, NULL);
-					assert(rv == SQLITE_OK);
-					rv = insert_checksum(snapshot_sm->stmt, 0/*checksum*/, 0/*pageno*/);
-					assert(rv == SQLITE_OK);
-					sm_move(leader, LS_SIGNATURES_CALC_STARTED);
-					break;
+	case LS_FOLLOWER_ONLINE:
+		switch (msg->type) {
+		case RAFT_IO_APPEND_ENTRIES:
+			raft_index follower_index =
+				msg->append_entries_result.last_log_index;
+			// assert(follower_index >= 0);
+			// Follower needs an entry which is not
+			// on the Raft log anymore.
+			if (log_index_not_found(r, follower_index)) {
+				sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
+				// sendInstallSnapshot();
+				// TODO: counter tracking in
+				// receiver and sender for pages
+				// to resend pages.
+			} else {
+				sm_move(leader, LS_FOLLOWER_ONLINE);
 			}
-            break;
-        case LS_SIGNATURES_CALC_STARTED:
-			switch (msg->type) {
-				case RAFT_IO_SIGNATURE_RESULT:
-					PRE(snapshot_sm->db != NULL);
-					PRE(snapshot_sm->stmt != NULL);
+		}
+		// TODO check that entry is in wal (I
+		// need the `entry` struct here to
+		// access the field). mxFrame: number of
+		// valid and committed frames in the
+		// WAL. nPage: size of the database in
+		// pages. nBackfill: Number of WAL
+		// frames that have already been
+		// backfilled into the database by prior
+		// checkpoints }
+		break;
+	case LS_FOLLOWER_WAS_NOTIFIED:
+		switch (msg->type) {
+		case RAFT_IO_SIGNATURE:
+			PRE(snapshot_state->db == NULL &&
+			    snapshot_state->stmt == NULL);
 
-					rv = insert_checksum(snapshot_sm->stmt, 0/*checksum*/, 0/*pageno*/);
-					assert(rv == SQLITE_OK);
-					// TODO Should we send the reply from here? Who's responsibility is it?
-					break;
-			}
+			// TODO probably we need
+			// to use callbacks here
+			// to send the messages
+			// after inserting in
+			// SQLite.
+			async_create_ht_db_and_stmt(snapshot_state);
+			async_insert_checksums(snapshot_state,
+					       msg->signature.cs,
+					       msg->signature.cs_nr);
+			sm_move(leader, LS_SIGNATURES_CALC_STARTED);
+			POST(snapshot_state->db != NULL &&
+			     snapshot_state->stmt != NULL);
 			break;
+		}
+		break;
+	case LS_SIGNATURES_CALC_STARTED:
+		switch (msg->type) {
+		case RAFT_IO_SIGNATURE:
+			PRE(snapshot_state->db != NULL &&
+			    snapshot_state->stmt != NULL);
+
+			async_insert_checksums(snapshot_state,
+					       msg->signature.cs,
+					       msg->signature.cs_nr);
+			// sendSignatureResponse();
+			break;
+		}
+		break;
 	}
 }
 
-int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id) {
+int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id)
+{
 	for (int i = 0; i < (int)leader_state->n_snapshot_sms; i++) {
 		if (leader_state->snapshot_sms[i].id == id) {
 			return i;
@@ -471,42 +490,41 @@ int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id) {
 	return -1;
 }
 
-__attribute__((unused)) static bool leader_invariant(const struct sm *sm, int prev_state)
+__attribute__((unused)) static bool leader_invariant(const struct sm *sm,
+						     int prev_state)
 {
-	(void) prev_state;
+	// TODO if we need msg pointer it is better to store it in the
+	// state thanto pass it.
+	// TODO What happens when nodes join the cluster.
 
-	struct snapshot_state *snapshot_sm = CONTAINER_OF(sm, struct snapshot_state, sm);
-	struct raft *r = snapshot_sm->r;
-
-	// TODO I think this should not happen here because we should only be
-	// checking the invariant of the state machine and not for all of them but
-	// I am not sure.
-	CHECK(r->state == RAFT_LEADER);
-	unsigned n_replicating_nodes = 0;
-	for (unsigned i = 0; i < r->configuration.n; i++) {
-		struct raft_server server = r->configuration.servers[i];
-		if (server.role == RAFT_STANDBY || server.role == RAFT_VOTER) {
-			CHECK(index_snapshot_sm(&r->leader_state, server.id));
-			n_replicating_nodes++;
-		}
-	}
-	CHECK(r->leader_state.n_snapshot_sms == n_replicating_nodes);
+	struct snapshot_state *state =
+		CONTAINER_OF(sm, struct snapshot_state, sm);
 
 	// State transitions.
-	CHECK(
-		ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
-			prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
-		ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
-			prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
-		ERGO(sm_state(sm) == LS_SIGNATURES_CALC_STARTED,
-			prev_state == LS_FOLLOWER_WAS_NOTIFIED) &&
-		ERGO(sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED,
-			prev_state == LS_SIGNATURES_CALC_STARTED) &&
-		ERGO(sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT,
-			prev_state == LS_SNAPSHOT_INSTALLATION_STARTED) &&
-		ERGO(sm_state(sm) == LS_SNAPSHOT_DONE_SENT,
-			prev_state == LS_SNAPSHOT_CHUNCK_SENT)
-	);
+	CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
+	      ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
+	      ERGO(sm_state(sm) == LS_SIGNATURES_CALC_STARTED,
+		   prev_state == LS_FOLLOWER_WAS_NOTIFIED ||
+			   prev_state == LS_SIGNATURES_CALC_STARTED) &&
+	      ERGO(sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED,
+		   prev_state == LS_SIGNATURES_CALC_STARTED) &&
+	      ERGO(sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT,
+		   prev_state == LS_SNAPSHOT_INSTALLATION_STARTED) &&
+	      ERGO(sm_state(sm) == LS_SNAPSHOT_DONE_SENT,
+		   prev_state == LS_SNAPSHOT_CHUNCK_SENT) &&
+	      ERGO(sm_state(sm) == LS_FOLLOWER_ONLINE,
+		   prev_state == LS_SNAPSHOT_DONE_SENT ||
+			   prev_state == LS_SNAPSHOT_DONE_SENT));
+
+	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
+	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
+	    sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT) {
+		CHECK(state->db != NULL && state->stmt != NULL);
+	} else {
+		CHECK(state->db == NULL && state->stmt == NULL);
+	}
 }
 
 static void installSnapshotSendCb(struct raft_io_send *req, int status)
@@ -515,26 +533,23 @@ static void installSnapshotSendCb(struct raft_io_send *req, int status)
 	raft_free(req);
 }
 
-int recvInstallSnapshot(struct raft *r,
-			const raft_id id,
-			const char *address,
+int recvInstallSnapshot(struct raft *r, const raft_id id, const char *address,
 			struct raft_install_snapshot *args)
 {
 	struct raft_io_send *req;
 	struct raft_message message;
 	struct raft_append_entries_result *result =
-	    &message.append_entries_result;
+		&message.append_entries_result;
 	int rv;
 	int match;
 	bool async;
 
 	assert(address != NULL);
-	tracef(
-	    "self:%llu from:%llu@%s conf_index:%llu last_index:%llu "
-	    "last_term:%llu "
-	    "term:%llu",
-	    r->id, id, address, args->conf_index, args->last_index,
-	    args->last_term, args->term);
+	tracef("self:%llu from:%llu@%s conf_index:%llu last_index:%llu "
+	       "last_term:%llu "
+	       "term:%llu",
+	       r->id, id, address, args->conf_index, args->last_index,
+	       args->last_term, args->term);
 
 	result->rejected = args->last_index;
 	result->last_log_index = logLastIndex(r->log);
@@ -551,7 +566,8 @@ int recvInstallSnapshot(struct raft *r,
 		goto reply;
 	}
 
-	/* TODO: this logic duplicates the one in the AppendEntries handler */
+	/* TODO: this logic duplicates the one in the AppendEntries
+		 * handler */
 	assert(r->state == RAFT_FOLLOWER || r->state == RAFT_CANDIDATE);
 	assert(r->current_term == args->term);
 	if (r->state == RAFT_CANDIDATE) {
