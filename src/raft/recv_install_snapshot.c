@@ -1,5 +1,4 @@
-#include <sqlite3.h>
-#include <stdio.h>
+#include "recv_install_snapshot.h"
 
 #include "../tracing.h"
 #include "assert.h"
@@ -365,7 +364,7 @@ static int create_ht_db_and_stmt(struct raft_io_async_work *req)
 	int rv;
 
 	struct snapshot_state *state = (struct snapshot_state *)req->data;
-	sprintf(db_filename, "ht-%lld", state->id);
+	sprintf(db_filename, "ht-%lld", state->follower_id);
 	rv = sqlite3_open_v2(db_filename, &state->db, 0, "unix");
 	assert(rv == SQLITE_OK);
 	rv = sqlite3_exec(state->db,
@@ -400,7 +399,6 @@ bool is_main_thread(void)
 
 void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
-	int rv;
 	(void)leader_states;
 
 	assert(leader != NULL);
@@ -433,15 +431,11 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 				sm_move(leader, LS_FOLLOWER_ONLINE);
 			}
 		}
-		// TODO check that entry is in wal (I
-		// need the `entry` struct here to
-		// access the field). mxFrame: number of
-		// valid and committed frames in the
-		// WAL. nPage: size of the database in
-		// pages. nBackfill: Number of WAL
-		// frames that have already been
-		// backfilled into the database by prior
-		// checkpoints }
+		// TODO check that entry is in wal (I need the `entry` struct here to
+		// access the field). mxFrame: number of valid and committed frames in
+		// the WAL. nPage: size of the database in pages. nBackfill: Number of
+		// WAL frames that have already been backfilled into the database by
+		// prior checkpoints }
 		break;
 	case LS_FOLLOWER_WAS_NOTIFIED:
 		switch (msg->type) {
@@ -449,11 +443,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 			PRE(snapshot_state->db == NULL &&
 			    snapshot_state->stmt == NULL);
 
-			// TODO probably we need
-			// to use callbacks here
-			// to send the messages
-			// after inserting in
-			// SQLite.
+			// TODO probably we need to use callbacks here to send the messages
+			// after inserting in SQLite.
 			async_create_ht_db_and_stmt(snapshot_state);
 			async_insert_checksums(snapshot_state,
 					       msg->signature.cs,
@@ -493,6 +484,7 @@ int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id)
 __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 						     int prev_state)
 {
+	bool rv;
 	// TODO if we need msg pointer it is better to store it in the
 	// state thanto pass it.
 	// TODO What happens when nodes join the cluster.
@@ -501,7 +493,7 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 		CONTAINER_OF(sm, struct snapshot_state, sm);
 
 	// State transitions.
-	CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+	rv = CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
 		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
 	      ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
 		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
@@ -517,14 +509,24 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	      ERGO(sm_state(sm) == LS_FOLLOWER_ONLINE,
 		   prev_state == LS_SNAPSHOT_DONE_SENT ||
 			   prev_state == LS_SNAPSHOT_DONE_SENT));
+	if (!rv) {
+		return false;
+	}
 
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT) {
-		CHECK(state->db != NULL && state->stmt != NULL);
+		rv = CHECK(state->db != NULL && state->stmt != NULL);
+		if (!rv) {
+			return false;
+		}
 	} else {
-		CHECK(state->db == NULL && state->stmt == NULL);
+		rv = CHECK(state->db == NULL && state->stmt == NULL);
+		if (!rv) {
+			return false;
+		}
 	}
+	return true;
 }
 
 static void installSnapshotSendCb(struct raft_io_send *req, int status)
@@ -533,23 +535,26 @@ static void installSnapshotSendCb(struct raft_io_send *req, int status)
 	raft_free(req);
 }
 
-int recvInstallSnapshot(struct raft *r, const raft_id id, const char *address,
+int recvInstallSnapshot(struct raft *r,
+			const raft_id id,
+			const char *address,
 			struct raft_install_snapshot *args)
 {
 	struct raft_io_send *req;
 	struct raft_message message;
 	struct raft_append_entries_result *result =
-		&message.append_entries_result;
+	    &message.append_entries_result;
 	int rv;
 	int match;
 	bool async;
 
 	assert(address != NULL);
-	tracef("self:%llu from:%llu@%s conf_index:%llu last_index:%llu "
-	       "last_term:%llu "
-	       "term:%llu",
-	       r->id, id, address, args->conf_index, args->last_index,
-	       args->last_term, args->term);
+	tracef(
+	    "self:%llu from:%llu@%s conf_index:%llu last_index:%llu "
+	    "last_term:%llu "
+	    "term:%llu",
+	    r->id, id, address, args->conf_index, args->last_index,
+	    args->last_term, args->term);
 
 	result->rejected = args->last_index;
 	result->last_log_index = logLastIndex(r->log);
@@ -566,8 +571,7 @@ int recvInstallSnapshot(struct raft *r, const raft_id id, const char *address,
 		goto reply;
 	}
 
-	/* TODO: this logic duplicates the one in the AppendEntries
-		 * handler */
+	/* TODO: this logic duplicates the one in the AppendEntries handler */
 	assert(r->state == RAFT_FOLLOWER || r->state == RAFT_CANDIDATE);
 	assert(r->current_term == args->term);
 	if (r->state == RAFT_CANDIDATE) {

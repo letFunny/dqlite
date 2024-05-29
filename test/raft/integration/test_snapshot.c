@@ -1,5 +1,6 @@
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
+#include "src/raft/recv_install_snapshot.h"
 
 /******************************************************************************
  *
@@ -857,4 +858,42 @@ TEST(snapshot, newTermWhileInstalling, setUp, tearDown, 0, NULL)
     CLUSTER_ELECT(1);
     CLUSTER_STEP_UNTIL_ELAPSED(1000);
     return MUNIT_OK;
+}
+
+static int mock_async_work(struct raft_io *io, struct raft_io_async_work *req, raft_io_async_work_cb cb) {
+	(void)io;
+	(void)req;
+	(void)cb;
+	return 0;
+}
+
+TEST(snapshot, basic, NULL, NULL, 0, NULL) {
+	// TODO fixture into setup.
+
+	struct raft_io raft_io = {
+		.async_work = mock_async_work,
+	};
+	struct raft r = {
+		.io = &raft_io,
+	};
+	struct snapshot_state state = {
+		.r = &r,
+	};
+	// TODO initialize raft and include some entries.
+
+	// TODO do this with macros.
+{
+	struct raft_message msg = {
+		.type = RAFT_IO_APPEND_ENTRIES_RESULT,
+		.server_id = 0,
+		.server_address = "address",
+	};
+	struct raft_append_entries_result append_entries_result = {
+		.version = RAFT_APPEND_ENTRIES_RESULT_VERSION,
+		.last_log_index = 10,
+	};
+	msg.append_entries_result = append_entries_result;
+	leader_tick(&state.sm, &msg);
+}
+	return MUNIT_OK;
 }

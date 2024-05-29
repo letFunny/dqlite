@@ -9,7 +9,7 @@
 
 struct snapshot_state {
 	struct sm sm;
-	raft_id id;
+	raft_id follower_id;
 	sqlite3 *db;
 	sqlite3_stmt *stmt;
 	struct raft *r;

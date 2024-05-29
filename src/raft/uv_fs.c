@@ -9,6 +9,7 @@
 #include "compress.h"
 #include "err.h"
 #include "heap.h"
+#include "src/tracing.h"
 #include "uv_os.h"
 
 int UvFsCheckDir(const char *dir, char *errmsg)
@@ -521,6 +522,7 @@ int UvFsReadFile(const char *dir,
 
 	buf->len = (size_t)sb.st_size;
 	buf->base = RaftHeapMalloc(buf->len);
+    tracef("HERE FILENAME, SIZE: %s, %ld", filename, buf->len);
 	if (buf->base == NULL) {
 		ErrMsgOom(errmsg);
 		rv = RAFT_NOMEM;

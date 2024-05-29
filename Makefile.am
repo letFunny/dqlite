@@ -246,7 +246,7 @@ raft_core_unit_test_CFLAGS = $(AM_CFLAGS) -Wno-conversion
 raft_core_unit_test_LDADD = libtest.la
 
 raft_core_integration_test_SOURCES = \
-  src/tracing.c \
+  $(basic_dqlite_sources) \
   test/raft/integration/main_core.c \
   test/raft/integration/test_apply.c \
   test/raft/integration/test_assign.c \
@@ -267,18 +267,18 @@ raft_core_integration_test_SOURCES = \
   test/raft/integration/test_transfer.c \
   test/raft/integration/test_voter_contacts.c
 raft_core_integration_test_CFLAGS = $(AM_CFLAGS) -Wno-conversion
-raft_core_integration_test_LDFLAGS = -no-install
+raft_core_integration_test_LDFLAGS = $(AM_LDFLAGS) -no-install
 raft_core_integration_test_LDADD = libtest.la libraft.la
 
 raft_core_fuzzy_test_SOURCES = \
-  src/tracing.c \
+  $(basic_dqlite_sources) \
   test/raft/fuzzy/main_core.c \
   test/raft/fuzzy/test_election.c \
   test/raft/fuzzy/test_liveness.c \
   test/raft/fuzzy/test_membership.c \
   test/raft/fuzzy/test_replication.c
 raft_core_fuzzy_test_CFLAGS = $(AM_CFLAGS) -Wno-conversion
-raft_core_fuzzy_test_LDFLAGS = -no-install
+raft_core_fuzzy_test_LDFLAGS = $(AM_LDFLAGS) -no-install
 raft_core_fuzzy_test_LDADD = libtest.la libraft.la
 
 raft_uv_unit_test_SOURCES = \
@@ -293,14 +293,15 @@ raft_uv_unit_test_SOURCES = \
   test/raft/unit/test_uv_os.c \
   test/raft/unit/test_uv_writer.c
 raft_uv_unit_test_CFLAGS = $(AM_CFLAGS) -Wno-conversion
-raft_uv_unit_test_LDADD = libtest.la $(UV_LIBS)
+raft_uv_unit_test_LDFLAGS = $(AM_LDFLAGS) -no-install
+raft_uv_unit_test_LDADD = libtest.la $(UV_LIBS) libdqlite.la
 
 # The integration/uv test is not linked to libraft, but built
 # directly against the libraft sources in order to test some
 # non-visible, non-API functions.
 raft_uv_integration_test_SOURCES = \
+  $(basic_dqlite_sources) \
   $(libraft_la_SOURCES) \
-  src/tracing.c \
   test/raft/integration/main_uv.c \
   test/raft/integration/test_uv_init.c \
   test/raft/integration/test_uv_append.c \
@@ -317,7 +318,7 @@ raft_uv_integration_test_SOURCES = \
   test/raft/integration/test_uv_truncate_snapshot.c \
   test/raft/integration/test_uv_work.c
 raft_uv_integration_test_CFLAGS = $(AM_CFLAGS) -Wno-type-limits -Wno-conversion
-raft_uv_integration_test_LDFLAGS = -no-install
+raft_uv_integration_test_LDFLAGS = $(AM_LDFLAGS) -no-install
 raft_uv_integration_test_LDADD = libtest.la $(UV_LIBS)
 
 if LZ4_AVAILABLE

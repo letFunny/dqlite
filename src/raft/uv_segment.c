@@ -12,6 +12,7 @@
 #include "configuration.h"
 #include "entry.h"
 #include "heap.h"
+#include "src/tracing.h"
 #include "uv.h"
 #include "uv_encoding.h"
 
@@ -245,6 +246,7 @@ static int uvLoadEntriesBatch(struct uv *uv,
 
 	n = (size_t)byteFlip64(*(uint64_t *)batch);
 	if (n == 0) {
+        tracef("HERE OFFSET AT ERROR: %ld", *offset);
 		ErrMsgPrintf(uv->io->errmsg,
 			     "entries count in preamble is zero");
 		rv = RAFT_CORRUPT;
@@ -403,6 +405,7 @@ int uvSegmentLoadClosed(struct uv *uv,
 		goto err_after_read;
 	}
 
+    tracef("HERE buf size: %ld", buf.len);
 	/* Load all batches in the segment. */
 	*entries = NULL;
 	*n = 0;
@@ -410,6 +413,7 @@ int uvSegmentLoadClosed(struct uv *uv,
 	last = false;
 	offset = sizeof format;
 	for (i = 1; !last; i++) {
+        tracef("HERE OFFSET: %ld", offset);
 		rv = uvLoadEntriesBatch(uv, &buf, &tmp_entries, &tmp_n, &offset,
 					&last);
 		if (rv != 0) {
@@ -933,6 +937,7 @@ int uvSegmentLoadAll(struct uv *uv,
 				goto err;
 			}
 
+            tracef("HERE i == %ld", i);
 			rv =
 			    uvSegmentLoadClosed(uv, info, &tmp_entries, &tmp_n);
 			if (rv != 0) {
@@ -1056,11 +1061,7 @@ int uvSegmentCreateClosedWithConfiguration(
     const struct raft_configuration *configuration)
 {
 	struct raft_buffer buf;
-	char filename[UV__FILENAME_LEN];
 	int rv;
-
-	/* Render the path */
-	sprintf(filename, UV__CLOSED_TEMPLATE, index, index);
 
 	/* Encode the given configuration. */
 	rv = configurationEncode(configuration, &buf);
@@ -1131,11 +1132,6 @@ int uvSegmentTruncate(struct uv *uv,
 		goto out_after_buffer_init;
 	}
 
-	/* Render the path.
-	 *
-	 * TODO: we should use a temporary file name so in case of crash we
-	 * don't consider this segment as corrupted.
-	 */
 	sprintf(filename, UV__CLOSED_TEMPLATE, segment->first_index, index - 1);
 
 	data.base = buf.arena.base;

@@ -1,7 +1,9 @@
+#include <uv.h>
 #include "assert.h"
 #include "byte.h"
 #include "heap.h"
 #include "../lib/queue.h"
+#include "../client/protocol.h"
 #include "uv.h"
 #include "uv_encoding.h"
 #include "uv_writer.h"
@@ -84,6 +86,7 @@ static void uvAliveSegmentFinalize(struct uvAliveSegment *s)
 	struct uv *uv = s->uv;
 	int rv;
 
+    // HERE we get the index that will be used later.
 	rv = UvFinalize(uv, s->counter, s->written, s->first_index,
 			s->last_index);
 	if (rv != 0) {
@@ -207,7 +210,7 @@ static void uvAliveSegmentWriteCb(struct UvWriterReq *write, const int status)
 	}
 
 	s->written = s->next_block * uv->block_size + s->pending.n;
-	s->last_index = s->pending_last_index;
+	s->last_index = s->pending_last_index; // HERE the last_index is set on the callback after write!!!.
 
 	/* Update our write markers.
 	 *
@@ -306,20 +309,38 @@ out:
 	}
 }
 
+
+static void timer_cb(uv_timer_t *timer)
+{
+	tracef("HERE inside timer");
+    struct uvAliveSegment *s = (struct uvAliveSegment*)timer->data;
+	UvWriterSubmit(&s->writer, &s->write, &s->buf, 1,
+			    s->next_block * s->uv->block_size,
+			    uvAliveSegmentWriteCb);
+}
 /* Submit a file write request to append the entries encoded in the write buffer
  * of the given segment. */
 static int uvAliveSegmentWrite(struct uvAliveSegment *s)
 {
-	int rv;
+	// int rv;
 	assert(s->counter != 0);
 	assert(s->pending.n > 0);
 	uvSegmentBufferFinalize(&s->pending, &s->buf);
-	rv = UvWriterSubmit(&s->writer, &s->write, &s->buf, 1,
+
+    uv_timer_t *timer = mallocChecked(sizeof(uv_timer_t));
+    uv_timer_init(s->uv->loop, timer);
+    timer->data = s;
+	tracef("HERE submit timer");
+    uv_timer_start(timer, timer_cb, 100, 0);
+
+	/* rv = UvWriterSubmit(&s->writer, &s->write, &s->buf, 1,
 			    s->next_block * s->uv->block_size,
-			    uvAliveSegmentWriteCb);
+			    uvAliveSegmentWriteCb); // HERE we write entries and update the last_index on callback!
+    // HERE the thing is that the fd is openned. When we call UvFinalize we are truncating the file and renaming it but the fd is not changing.
+    // HERE so the write happens afterwards.
 	if (rv != 0) {
 		return rv;
-	}
+	}*/
 	return 0;
 }
 
