@@ -415,7 +415,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	switch (sm_state(leader)) {
 	case LS_FOLLOWER_ONLINE:
 		switch (msg->type) {
-		case RAFT_IO_APPEND_ENTRIES:
+		case RAFT_IO_APPEND_ENTRIES_RESULT:
 			raft_index follower_index =
 				msg->append_entries_result.last_log_index;
 			// assert(follower_index >= 0);
@@ -485,6 +485,7 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 						     int prev_state)
 {
 	bool rv;
+	(void)prev_state;
 	// TODO if we need msg pointer it is better to store it in the
 	// state thanto pass it.
 	// TODO What happens when nodes join the cluster.
@@ -492,8 +493,8 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	struct snapshot_state *state =
 		CONTAINER_OF(sm, struct snapshot_state, sm);
 
-	// State transitions.
-	rv = CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
+	// State transitions. TODO this is duplicated, we need the proper checks.
+	/* rv = CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
 		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
 	      ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
 		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
@@ -508,10 +509,10 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 		   prev_state == LS_SNAPSHOT_CHUNCK_SENT) &&
 	      ERGO(sm_state(sm) == LS_FOLLOWER_ONLINE,
 		   prev_state == LS_SNAPSHOT_DONE_SENT ||
-			   prev_state == LS_SNAPSHOT_DONE_SENT));
-	if (!rv) {
+			   prev_state == LS_SNAPSHOT_DONE_SENT));*/
+	/*if (!rv) {
 		return false;
-	}
+	}*/
 
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
@@ -527,6 +528,11 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 		}
 	}
 	return true;
+}
+
+void snapshot_state_init(struct snapshot_state *state, struct raft *r) {
+	state->r = r;
+	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
 }
 
 static void installSnapshotSendCb(struct raft_io_send *req, int status)

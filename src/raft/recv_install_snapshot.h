@@ -19,6 +19,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg);
 
 void follower_tick(struct sm *follower, const struct raft_message *msg);
 
+void snapshot_state_init(struct snapshot_state *state, struct raft *r);
+
 /* Process an InstallSnapshot RPC from the given server. */
 int recvInstallSnapshot(struct raft *r,
 			raft_id id,
