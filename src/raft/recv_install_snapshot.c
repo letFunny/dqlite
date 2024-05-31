@@ -369,7 +369,7 @@ static void async_insert_checksums(struct snapshot_state *state,
 
 struct create_ht_and_stmt_data {
 	struct snapshot_state *state;
-	struct insert_checksum_data *insert_checksum_data;
+	struct insert_checksum_data insert_checksum_data;
 };
 
 static int create_ht_and_stmt(struct raft_io_async_work *req)
@@ -398,19 +398,23 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 				&state->stmt, NULL);
 	assert(rv == SQLITE_OK);
 
-	data->insert_checksum_data->state->stmt = state->stmt;
+	data->insert_checksum_data.state->stmt = state->stmt;
 	return SQLITE_OK;
 }
 
 static void create_ht_and_stmt_cb(struct raft_io_async_work *req, int status) {
 	if (status != SQLITE_OK) {
-		return;
+		goto freemem;
 	}
 	struct create_ht_and_stmt_data *data = (struct create_ht_and_stmt_data *)req->data;
 	struct raft_io_async_work work = {
-		.data = data->insert_checksum_data,
+		.data = &data->insert_checksum_data,
 	};
 	insert_checksums(&work);
+
+freemem:
+	raft_free(req->data);
+	raft_free(req);
 	return;
 }
 
@@ -419,23 +423,16 @@ static void async_create_ht_and_insert(struct snapshot_state *state,
 				   unsigned int cs_nr,
 				   int next_state)
 {
-	struct insert_checksum_data *insert_checksum_data;
-	insert_checksum_data = raft_malloc(sizeof *insert_checksum_data);
-	assert(insert_checksum_data != NULL);
-	*insert_checksum_data = (struct insert_checksum_data) {
+	struct create_ht_and_stmt_data *create_ht_and_stmt_data;
+	create_ht_and_stmt_data = raft_malloc(sizeof *create_ht_and_stmt_data);
+	assert(create_ht_and_stmt_data != NULL);
+	create_ht_and_stmt_data->state = state;
+	create_ht_and_stmt_data->insert_checksum_data = (struct insert_checksum_data) {
 		.state = state,
 		.cs = cs,
 		.cs_nr = cs_nr,
 		.next_state = next_state,
-	};
-
-	struct create_ht_and_stmt_data *create_ht_and_stmt_data;
-	create_ht_and_stmt_data = raft_malloc(sizeof *create_ht_and_stmt_data);
-	assert(create_ht_and_stmt_data != NULL);
-	*create_ht_and_stmt_data = (struct create_ht_and_stmt_data) {
-		.state = state,
-		.insert_checksum_data = insert_checksum_data,
-	};
+	};;
 
 	struct raft_io_async_work *work;
 	work = raft_malloc(sizeof *work);
