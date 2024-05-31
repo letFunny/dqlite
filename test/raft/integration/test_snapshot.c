@@ -1,3 +1,5 @@
+#include <assert.h>
+#include <string.h>
 #include <unistd.h>
 #include <sqlite3.h>
 #include <uv.h>
@@ -864,12 +866,14 @@ TEST(snapshot, newTermWhileInstalling, setUp, tearDown, 0, NULL)
     return MUNIT_OK;
 }
 
-void get_checksums_ht(char *filename, struct page_checksum_t *cs, int n_cs) {
+void get_checksums_ht(raft_id follower_id, struct page_checksum_t *cs, int n_cs) {
+	char db_filename[30];
 	sqlite3 *db;
 	sqlite3_stmt *stmt;
 	int rv;
 
-	rv = sqlite3_open_v2(filename, &db, SQLITE_OPEN_READONLY, "unix");
+	sprintf(db_filename, "ht-%lld", follower_id);
+	rv = sqlite3_open_v2(db_filename, &db, SQLITE_OPEN_READONLY, "unix");
 	munit_assert_int(rv, ==, SQLITE_OK);
 	rv = sqlite3_prepare_v2(db, "SELECT * FROM map;", -1, &stmt, NULL);
 	munit_assert_int(rv, ==, SQLITE_OK);
@@ -879,7 +883,7 @@ void get_checksums_ht(char *filename, struct page_checksum_t *cs, int n_cs) {
 		rv = sqlite3_step(stmt);
 		if (rv != SQLITE_ROW) {
 			munit_assert_int(i, ==, n_cs);
-			return;
+			break;
 		}
 		long long checksum = sqlite3_column_int64(stmt, 0);
 		long long page_no = sqlite3_column_int64(stmt, 1);
@@ -888,6 +892,15 @@ void get_checksums_ht(char *filename, struct page_checksum_t *cs, int n_cs) {
 			.page_no = page_no,
 		};
 		i++;
+	}
+
+	sqlite3_close(db);
+}
+
+void assert_cs_equal(struct page_checksum_t *cs1, struct page_checksum_t *cs2, size_t n) {
+	for (size_t i = 0; i < n; i++) {
+		munit_assert_int(cs1[i].checksum, ==, cs2[i].checksum);
+		munit_assert_int(cs1[i].page_no, ==, cs2[i].page_no);
 	}
 }
 
@@ -907,8 +920,11 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	raft_set_snapshot_threshold(raft_leader, 2);
 	CLUSTER_MAKE_PROGRESS;
 	CLUSTER_MAKE_PROGRESS;
+	/* Stop all traffic in the cluster. */
+	/* CLUSTER_SATURATE_BOTHWAYS(0, 1);
+	CLUSTER_SATURATE_BOTHWAYS(0, 2);
+	CLUSTER_SATURATE_BOTHWAYS(1, 2); TODO */
 
-	// TODO do this with macros.
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_APPEND_ENTRIES_RESULT,
@@ -936,19 +952,21 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 		msg.install_snapshot_result = install_snapshot_result;
 		leader_tick(&state.sm, &msg);
 	}
+
+	struct page_checksum_t cs[3] = {
+		{.page_no = 1, .checksum = 1},
+		{.page_no = 2, .checksum = 12},
+		{.page_no = 4, .checksum = 1234},
+	};
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_SIGNATURE,
 			.server_id = raft_follower->id,
 		};
-		struct page_checksum_t cs[2] = {
-			{.page_no = 1, .checksum = 1},
-			{.page_no = 2, .checksum = 12},
-		};
 		struct raft_signature signature = {
 			.cs = cs,
 			.cs_nr = 2,
-			.cs_page_no = 1,
+			.cs_page_no = 1 /* TODO use this field */,
 			.db = "db",
 		};
 		msg.signature = signature;
@@ -958,10 +976,29 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 		munit_assert_not_null(state.ht_stmt);
 
 		struct page_checksum_t actual_cs[2];
-		char db_filename[30];
-		sprintf(db_filename, "ht-%lld", raft_follower->id);
-		get_checksums_ht(db_filename, actual_cs, 2);
-		munit_assert_memory_equal(2, cs, actual_cs);
+		get_checksums_ht(raft_follower->id, actual_cs, 2);
+		assert_cs_equal(cs, actual_cs, 2);
+	}
+	{
+		struct raft_message msg = {
+			.type = RAFT_IO_SIGNATURE,
+			.server_id = raft_follower->id,
+		};
+		struct raft_signature signature = {
+			.cs = cs + 2,
+			.cs_nr = 1,
+			.cs_page_no = 1,
+			.db = "db",
+		};
+		msg.signature = signature;
+		leader_tick(&state.sm, &msg);
+		CLUSTER_STEP_UNTIL_ELAPSED(500);
+		munit_assert_not_null(state.ht);
+		munit_assert_not_null(state.ht_stmt);
+
+		struct page_checksum_t actual_cs[3];
+		get_checksums_ht(raft_follower->id, actual_cs, 3);
+		assert_cs_equal(cs, actual_cs, 3);
 	}
 
 	return MUNIT_OK;

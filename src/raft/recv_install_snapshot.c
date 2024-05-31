@@ -287,7 +287,7 @@ static const struct sm_conf leader_states[LS_NR] = {
 	[LS_SIGNATURES_CALC_STARTED] = {
 		.flags = 0,
 		.name = "signature_calc_started",
-		.allowed = BITS(LS_SNAPSHOT_INSTALLATION_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_SNAPSHOT_INSTALLATION_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
 	},
 	[LS_SNAPSHOT_INSTALLATION_STARTED] = {
 		.flags = 0,
@@ -341,23 +341,37 @@ static int insert_checksums(struct raft_io_async_work *req)
 	return SQLITE_OK;
 }
 
+static void async_insert_checksums_cb(struct raft_io_async_work *req, int status) {
+	(void)status;
+
+	raft_free(req->data);
+	raft_free(req);
+}
+
 static void async_insert_checksums(struct snapshot_state *state,
 				   struct page_checksum_t *cs,
 				   unsigned int cs_nr,
 				   int next_state)
 {
 	// TODO malloc.
-	struct insert_checksum_data data = {
+	struct insert_checksum_data *data;
+	data = raft_malloc(sizeof(*data));
+	assert(data != NULL);
+	*data = (struct insert_checksum_data) {
 		.state = state,
 		.cs = cs,
 		.cs_nr = cs_nr,
 		.next_state = next_state,
 	};
-	struct raft_io_async_work work = {
+
+	struct raft_io_async_work *work;
+	work = raft_malloc(sizeof(*work));
+	assert(work != NULL);
+	*work = (struct raft_io_async_work) {
 		.work = insert_checksums,
-		.data = &data,
+		.data = data,
 	};
-	state->r->io->async_work(state->r->io, &work, NULL);
+	state->r->io->async_work(state->r->io, work, async_insert_checksums_cb);
 }
 
 struct create_ht_and_stmt_data {
@@ -438,7 +452,6 @@ static void async_create_ht_and_insert(struct snapshot_state *state,
 		.work = create_ht_and_stmt,
 		.data = create_ht_and_stmt_data,
 	};
-	// TODO free memory.
 	state->r->io->async_work(state->r->io, work, create_ht_and_stmt_cb);
 }
 
@@ -498,11 +511,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 			PRE(snapshot_state->ht == NULL &&
 			    snapshot_state->ht_stmt == NULL);
 
+			// TODO: control that we do not move from stale state on async callback.
 			async_create_ht_and_insert(snapshot_state, msg->signature.cs, msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
-			// TODO this two should happen in order.
-			// sm_move(leader, LS_SIGNATURES_CALC_STARTED);
-			/* POST(snapshot_state->db != NULL &&
-			     snapshot_state->stmt != NULL);*/
 			// TODO: send RAFT_IO_SIGNATURE_RESULT.
 			break;
 		}
