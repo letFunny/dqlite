@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <sqlite3.h>
 #include <uv.h>
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
@@ -863,14 +864,41 @@ TEST(snapshot, newTermWhileInstalling, setUp, tearDown, 0, NULL)
     return MUNIT_OK;
 }
 
+void get_checksums_ht(char *filename, struct page_checksum_t *cs, int n_cs) {
+	sqlite3 *db;
+	sqlite3_stmt *stmt;
+	int rv;
+
+	rv = sqlite3_open_v2(filename, &db, SQLITE_OPEN_READONLY, "unix");
+	munit_assert_int(rv, ==, SQLITE_OK);
+	rv = sqlite3_prepare_v2(db, "SELECT * FROM map;", -1, &stmt, NULL);
+	munit_assert_int(rv, ==, SQLITE_OK);
+
+	unsigned i = 0;
+	while (true) {
+		rv = sqlite3_step(stmt);
+		if (rv != SQLITE_ROW) {
+			munit_assert_int(i, ==, n_cs);
+			return;
+		}
+		long long checksum = sqlite3_column_int64(stmt, 0);
+		long long page_no = sqlite3_column_int64(stmt, 1);
+		cs[i] = (struct page_checksum_t) {
+			.checksum = checksum,
+			.page_no = page_no,
+		};
+		i++;
+	}
+}
+
 TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	struct fixture *f = data;
 	(void)params;
 
 	struct raft *raft_leader = raft_fixture_get(&f->cluster, 0);
-	// struct raft *raft_follower = raft_fixture_get(&f->cluster, 1);
+	struct raft *raft_follower = raft_fixture_get(&f->cluster, 1);
 	struct snapshot_state state = {};
-	snapshot_state_init(&state, raft_leader);
+	snapshot_state_init(&state, raft_leader, raft_follower->id);
 
 	/* Node 0 is the leader. */
 	CLUSTER_DEPOSE;
@@ -884,8 +912,8 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_APPEND_ENTRIES_RESULT,
-			/* .server_id = raft_follower->id,
-			   .server_address = raft_follower->address, */
+			.server_id = raft_follower->id,
+			/* .server_address = raft_follower->address, */
 		};
 		struct raft_append_entries_result append_entries_result = {
 			.last_log_index = 0, /* Entry not contained in the log. */
@@ -899,6 +927,7 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
+			.server_id = raft_follower->id,
 		};
 		struct raft_install_snapshot_result install_snapshot_result = {
 			// TODO snapshot should not carry a db field.
@@ -910,20 +939,30 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_SIGNATURE,
+			.server_id = raft_follower->id,
 		};
-		struct page_checksum_t cs[1] = {{.page_no = 1, .checksum = 1}};
+		struct page_checksum_t cs[2] = {
+			{.page_no = 1, .checksum = 1},
+			{.page_no = 2, .checksum = 12},
+		};
 		struct raft_signature signature = {
 			.cs = cs,
-			.cs_nr = 1,
+			.cs_nr = 2,
 			.cs_page_no = 1,
 			.db = "db",
 		};
 		msg.signature = signature;
 		leader_tick(&state.sm, &msg);
+		CLUSTER_STEP_UNTIL_ELAPSED(500);
+		munit_assert_not_null(state.ht);
+		munit_assert_not_null(state.ht_stmt);
+
+		struct page_checksum_t actual_cs[2];
+		char db_filename[30];
+		sprintf(db_filename, "ht-%lld", raft_follower->id);
+		get_checksums_ht(db_filename, actual_cs, 2);
+		munit_assert_memory_equal(2, cs, actual_cs);
 	}
-    CLUSTER_STEP_UNTIL_ELAPSED(500);
-	munit_assert_not_null(state.ht);
-	munit_assert_not_null(state.ht_stmt);
 
 	return MUNIT_OK;
 }

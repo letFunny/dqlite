@@ -326,22 +326,15 @@ static int insert_checksums(struct raft_io_async_work *req)
 	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
 	sqlite3_stmt *stmt = data->state->ht_stmt;
 	for (unsigned int i = 0; i < data->cs_nr; i++) {
-		rv = sqlite3_bind_int(stmt, 0, (int)data->cs[i].checksum);
-		if (rv != SQLITE_OK) {
-			return rv;
-		}
-		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].page_no);
-		if (rv != SQLITE_OK) {
-			return rv;
-		}
+		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].checksum);
+		// TODO should this be asserts?
+		assert(rv == SQLITE_OK);
+		rv = sqlite3_bind_int(stmt, 2, (int)data->cs[i].page_no);
+		assert(rv == SQLITE_OK);
 		rv = sqlite3_step(stmt);
-		if (rv != SQLITE_OK) {
-			return rv;
-		}
+		assert(rv == SQLITE_DONE);
 		rv = sqlite3_reset(stmt);
-		if (rv != SQLITE_OK) {
-			return rv;
-		}
+		assert(rv == SQLITE_OK);
 	}
 
 	sm_move(&data->state->sm, data->next_state);
@@ -375,6 +368,7 @@ struct create_ht_and_stmt_data {
 static int create_ht_and_stmt(struct raft_io_async_work *req)
 {
 	char db_filename[30];
+	// TODO tracef with err_msg.
 	char *err_msg;
 	int rv;
 
@@ -403,6 +397,8 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 }
 
 static void create_ht_and_stmt_cb(struct raft_io_async_work *req, int status) {
+	int rv;
+
 	if (status != SQLITE_OK) {
 		goto freemem;
 	}
@@ -410,7 +406,8 @@ static void create_ht_and_stmt_cb(struct raft_io_async_work *req, int status) {
 	struct raft_io_async_work work = {
 		.data = &data->insert_checksum_data,
 	};
-	insert_checksums(&work);
+	rv = insert_checksums(&work);
+	assert(rv == SQLITE_OK);
 
 freemem:
 	raft_free(req->data);
@@ -464,6 +461,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	assert(snapshot_state != NULL && r != NULL);
 
 	PRE(is_main_thread());
+	PRE(msg->server_id == snapshot_state->follower_id);
 	// TODO think about callsite of this function (triggers: e.g. message
 	// recv, timeouts).
 	switch (sm_state(leader)) {
@@ -584,8 +582,9 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	return true;
 }
 
-void snapshot_state_init(struct snapshot_state *state, struct raft *r) {
+void snapshot_state_init(struct snapshot_state *state, struct raft *r, raft_id follower_id) {
 	state->r = r;
+	state->follower_id = follower_id;
 	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
 }
 
