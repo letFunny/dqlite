@@ -324,7 +324,7 @@ static int insert_checksums(struct raft_io_async_work *req)
 	int rv;
 
 	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
-	sqlite3_stmt *stmt = data->state->stmt;
+	sqlite3_stmt *stmt = data->state->ht_stmt;
 	for (unsigned int i = 0; i < data->cs_nr; i++) {
 		rv = sqlite3_bind_int(stmt, 0, (int)data->cs[i].checksum);
 		if (rv != SQLITE_OK) {
@@ -383,22 +383,22 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 	sprintf(db_filename, "ht-%lld", state->follower_id);
 	rv = UvOsUnlink(db_filename);
 	assert(rv == 0 || errno == ENOENT);
-	rv = sqlite3_open_v2(db_filename, &state->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
+	rv = sqlite3_open_v2(db_filename, &state->ht, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
 	assert(rv == SQLITE_OK);
-	rv = sqlite3_exec(state->db,
+	rv = sqlite3_exec(state->ht,
 			  "CREATE TABLE map (checksum INTEGER NOT NULL, pageno "
 			  "INTEGER NOT NULL UNIQUE);",
 			  NULL, NULL, &err_msg);
 	assert(rv == SQLITE_OK);
-	rv = sqlite3_exec(state->db, "CREATE INDEX map_idx on map(checksum);",
+	rv = sqlite3_exec(state->ht, "CREATE INDEX map_idx on map(checksum);",
 			  NULL, NULL, &err_msg);
 	assert(rv == SQLITE_OK);
-	rv = sqlite3_prepare_v2(state->db,
+	rv = sqlite3_prepare_v2(state->ht,
 				"INSERT OR IGNORE INTO map VALUES (?, ?);", -1,
-				&state->stmt, NULL);
+				&state->ht_stmt, NULL);
 	assert(rv == SQLITE_OK);
 
-	data->insert_checksum_data.state->stmt = state->stmt;
+	data->insert_checksum_data.state->ht_stmt = state->ht_stmt;
 	return SQLITE_OK;
 }
 
@@ -497,8 +497,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	case LS_FOLLOWER_WAS_NOTIFIED:
 		switch (msg->type) {
 		case RAFT_IO_SIGNATURE:
-			PRE(snapshot_state->db == NULL &&
-			    snapshot_state->stmt == NULL);
+			PRE(snapshot_state->ht == NULL &&
+			    snapshot_state->ht_stmt == NULL);
 
 			async_create_ht_and_insert(snapshot_state, msg->signature.cs, msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
 			// TODO this two should happen in order.
@@ -512,8 +512,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	case LS_SIGNATURES_CALC_STARTED:
 		switch (msg->type) {
 		case RAFT_IO_SIGNATURE:
-			PRE(snapshot_state->db != NULL &&
-			    snapshot_state->stmt != NULL);
+			PRE(snapshot_state->ht != NULL &&
+			    snapshot_state->ht_stmt != NULL);
 
 			async_insert_checksums(snapshot_state, msg->signature.cs,
 					msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
@@ -571,12 +571,12 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT) {
-		rv = CHECK(state->db != NULL && state->stmt != NULL);
+		rv = CHECK(state->ht != NULL && state->ht_stmt != NULL);
 		if (!rv) {
 			return false;
 		}
 	} else {
-		rv = CHECK(state->db == NULL && state->stmt == NULL);
+		rv = CHECK(state->ht == NULL && state->ht_stmt == NULL);
 		if (!rv) {
 			return false;
 		}

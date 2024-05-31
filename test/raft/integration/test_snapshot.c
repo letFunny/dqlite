@@ -901,7 +901,7 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 			.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
 		};
 		struct raft_install_snapshot_result install_snapshot_result = {
-			// TODO assert db is equal in the invariant.
+			// TODO snapshot should not carry a db field.
 			.db = "db",
 		};
 		msg.install_snapshot_result = install_snapshot_result;
@@ -922,8 +922,8 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 		leader_tick(&state.sm, &msg);
 	}
     CLUSTER_STEP_UNTIL_ELAPSED(500);
-	munit_assert_not_null(state.db);
-	munit_assert_not_null(state.stmt);
+	munit_assert_not_null(state.ht);
+	munit_assert_not_null(state.ht_stmt);
 
 	return MUNIT_OK;
 }
