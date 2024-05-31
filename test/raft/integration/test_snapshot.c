@@ -1,3 +1,5 @@
+#include <unistd.h>
+#include <uv.h>
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
 #include "src/raft.h"
@@ -862,34 +864,66 @@ TEST(snapshot, newTermWhileInstalling, setUp, tearDown, 0, NULL)
 }
 
 TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
-    struct fixture *f = data;
+	struct fixture *f = data;
 	(void)params;
 
-	struct raft *r = raft_fixture_get(&f->cluster, 0);
+	struct raft *raft_leader = raft_fixture_get(&f->cluster, 0);
+	// struct raft *raft_follower = raft_fixture_get(&f->cluster, 1);
 	struct snapshot_state state = {};
-	snapshot_state_init(&state, r);
+	snapshot_state_init(&state, raft_leader);
 
 	/* Node 0 is the leader. */
 	CLUSTER_DEPOSE;
 	CLUSTER_ELECT(0);
 	/* Create some entries and trigger a snapshot. */
-	raft_set_snapshot_threshold(r, 2);
-    CLUSTER_MAKE_PROGRESS;
-    CLUSTER_MAKE_PROGRESS;
+	raft_set_snapshot_threshold(raft_leader, 2);
+	CLUSTER_MAKE_PROGRESS;
+	CLUSTER_MAKE_PROGRESS;
 
 	// TODO do this with macros.
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_APPEND_ENTRIES_RESULT,
-			.server_id = 0,
-			.server_address = "address",
+			/* .server_id = raft_follower->id,
+			   .server_address = raft_follower->address, */
 		};
 		struct raft_append_entries_result append_entries_result = {
-			.version = RAFT_APPEND_ENTRIES_RESULT_VERSION,
-			.last_log_index = 0,
+			.last_log_index = 0, /* Entry not contained in the log. */
+			/* .term = raft_leader->current_term,
+			   .version = RAFT_APPEND_ENTRIES_RESULT_VERSION,
+			   .rejected = true, */
 		};
 		msg.append_entries_result = append_entries_result;
 		leader_tick(&state.sm, &msg);
 	}
+	{
+		struct raft_message msg = {
+			.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
+		};
+		struct raft_install_snapshot_result install_snapshot_result = {
+			// TODO assert db is equal in the invariant.
+			.db = "db",
+		};
+		msg.install_snapshot_result = install_snapshot_result;
+		leader_tick(&state.sm, &msg);
+	}
+	{
+		struct raft_message msg = {
+			.type = RAFT_IO_SIGNATURE,
+		};
+		struct page_checksum_t cs[1] = {{.page_no = 1, .checksum = 1}};
+		struct raft_signature signature = {
+			.cs = cs,
+			.cs_nr = 1,
+			.cs_page_no = 1,
+			.db = "db",
+		};
+		msg.signature = signature;
+		leader_tick(&state.sm, &msg);
+	}
+    CLUSTER_STEP_UNTIL_ELAPSED(500);
+	munit_assert_not_null(state.db);
+	munit_assert_not_null(state.stmt);
+
 	return MUNIT_OK;
 }

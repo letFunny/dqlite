@@ -1,4 +1,6 @@
 #include "recv_install_snapshot.h"
+#include <assert.h>
+#include <stdio.h>
 
 #include "../tracing.h"
 #include "assert.h"
@@ -11,6 +13,7 @@
 #include "../lib/sm.h"
 #include "src/raft.h"
 #include "src/raft/recv_install_snapshot.h"
+#include "src/raft/uv_os.h"
 
 /**
  * =Overview
@@ -310,45 +313,52 @@ static bool log_index_not_found(struct raft *r, raft_index follower_index)
 }
 
 struct insert_checksum_data {
-	sqlite3_stmt *stmt;
+	struct snapshot_state *state;
 	struct page_checksum_t *cs;
 	unsigned int cs_nr;
+	int next_state;
 };
 
 static int insert_checksums(struct raft_io_async_work *req)
 {
 	int rv;
 
-	struct insert_checksum_data *data = (struct insert_checksum_data *)req;
+	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
+	sqlite3_stmt *stmt = data->state->stmt;
 	for (unsigned int i = 0; i < data->cs_nr; i++) {
-		rv = sqlite3_bind_int(data->stmt, 0, (int)data->cs[i].checksum);
+		rv = sqlite3_bind_int(stmt, 0, (int)data->cs[i].checksum);
 		if (rv != SQLITE_OK) {
 			return rv;
 		}
-		rv = sqlite3_bind_int(data->stmt, 1, (int)data->cs[i].page_no);
+		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].page_no);
 		if (rv != SQLITE_OK) {
 			return rv;
 		}
-		rv = sqlite3_step(data->stmt);
+		rv = sqlite3_step(stmt);
 		if (rv != SQLITE_OK) {
 			return rv;
 		}
-		rv = sqlite3_reset(data->stmt);
+		rv = sqlite3_reset(stmt);
 		if (rv != SQLITE_OK) {
 			return rv;
 		}
 	}
+
+	sm_move(&data->state->sm, data->next_state);
 	return SQLITE_OK;
 }
 
 static void async_insert_checksums(struct snapshot_state *state,
 				   struct page_checksum_t *cs,
-				   unsigned int cs_nr)
+				   unsigned int cs_nr,
+				   int next_state)
 {
+	// TODO malloc.
 	struct insert_checksum_data data = {
-		.stmt = state->stmt,
+		.state = state,
 		.cs = cs,
 		.cs_nr = cs_nr,
+		.next_state = next_state,
 	};
 	struct raft_io_async_work work = {
 		.work = insert_checksums,
@@ -357,15 +367,23 @@ static void async_insert_checksums(struct snapshot_state *state,
 	state->r->io->async_work(state->r->io, &work, NULL);
 }
 
-static int create_ht_db_and_stmt(struct raft_io_async_work *req)
+struct create_ht_and_stmt_data {
+	struct snapshot_state *state;
+	struct insert_checksum_data *insert_checksum_data;
+};
+
+static int create_ht_and_stmt(struct raft_io_async_work *req)
 {
 	char db_filename[30];
 	char *err_msg;
 	int rv;
 
-	struct snapshot_state *state = (struct snapshot_state *)req->data;
+	struct create_ht_and_stmt_data *data = (struct create_ht_and_stmt_data *)req->data;
+	struct snapshot_state *state = data->state;
 	sprintf(db_filename, "ht-%lld", state->follower_id);
-	rv = sqlite3_open_v2(db_filename, &state->db, 0, "unix");
+	rv = UvOsUnlink(db_filename);
+	assert(rv == 0 || errno == ENOENT);
+	rv = sqlite3_open_v2(db_filename, &state->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
 	assert(rv == SQLITE_OK);
 	rv = sqlite3_exec(state->db,
 			  "CREATE TABLE map (checksum INTEGER NOT NULL, pageno "
@@ -379,16 +397,55 @@ static int create_ht_db_and_stmt(struct raft_io_async_work *req)
 				"INSERT OR IGNORE INTO map VALUES (?, ?);", -1,
 				&state->stmt, NULL);
 	assert(rv == SQLITE_OK);
+
+	data->insert_checksum_data->state->stmt = state->stmt;
 	return SQLITE_OK;
 }
 
-static void async_create_ht_db_and_stmt(struct snapshot_state *state)
-{
+static void create_ht_and_stmt_cb(struct raft_io_async_work *req, int status) {
+	if (status != SQLITE_OK) {
+		return;
+	}
+	struct create_ht_and_stmt_data *data = (struct create_ht_and_stmt_data *)req->data;
 	struct raft_io_async_work work = {
-		.work = create_ht_db_and_stmt,
-		.data = state,
+		.data = data->insert_checksum_data,
 	};
-	state->r->io->async_work(state->r->io, &work, NULL);
+	insert_checksums(&work);
+	return;
+}
+
+static void async_create_ht_and_insert(struct snapshot_state *state,
+				   struct page_checksum_t *cs,
+				   unsigned int cs_nr,
+				   int next_state)
+{
+	struct insert_checksum_data *insert_checksum_data;
+	insert_checksum_data = raft_malloc(sizeof *insert_checksum_data);
+	assert(insert_checksum_data != NULL);
+	*insert_checksum_data = (struct insert_checksum_data) {
+		.state = state,
+		.cs = cs,
+		.cs_nr = cs_nr,
+		.next_state = next_state,
+	};
+
+	struct create_ht_and_stmt_data *create_ht_and_stmt_data;
+	create_ht_and_stmt_data = raft_malloc(sizeof *create_ht_and_stmt_data);
+	assert(create_ht_and_stmt_data != NULL);
+	*create_ht_and_stmt_data = (struct create_ht_and_stmt_data) {
+		.state = state,
+		.insert_checksum_data = insert_checksum_data,
+	};
+
+	struct raft_io_async_work *work;
+	work = raft_malloc(sizeof *work);
+	assert(work != NULL);
+	*work = (struct raft_io_async_work) {
+		.work = create_ht_and_stmt,
+		.data = create_ht_and_stmt_data,
+	};
+	// TODO free memory.
+	state->r->io->async_work(state->r->io, work, create_ht_and_stmt_cb);
 }
 
 bool is_main_thread(void)
@@ -414,22 +471,19 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	// recv, timeouts).
 	switch (sm_state(leader)) {
 	case LS_FOLLOWER_ONLINE:
-		switch (msg->type) {
-		case RAFT_IO_APPEND_ENTRIES_RESULT:
-			raft_index follower_index =
-				msg->append_entries_result.last_log_index;
-			// assert(follower_index >= 0);
-			// Follower needs an entry which is not
-			// on the Raft log anymore.
-			if (log_index_not_found(r, follower_index)) {
-				sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
-				// sendInstallSnapshot();
-				// TODO: counter tracking in
-				// receiver and sender for pages
-				// to resend pages.
-			} else {
-				sm_move(leader, LS_FOLLOWER_ONLINE);
-			}
+		if (msg->type != RAFT_IO_APPEND_ENTRIES_RESULT) {
+			break;
+		}
+		raft_index follower_index =
+			msg->append_entries_result.last_log_index;
+		// Follower needs an entry which is not
+		// on the Raft log anymore.
+		if (log_index_not_found(r, follower_index)) {
+			// TODO: send RAFT_IO_INSTALL_SNAPSHOT.
+			sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
+			// TODO: counter tracking in receiver and sender for pages to resend pages.
+		} else {
+			sm_move(leader, LS_FOLLOWER_ONLINE);
 		}
 		// TODO check that entry is in wal (I need the `entry` struct here to
 		// access the field). mxFrame: number of valid and committed frames in
@@ -437,21 +491,24 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		// WAL frames that have already been backfilled into the database by
 		// prior checkpoints }
 		break;
+	case LS_FOLLOWER_NEEDS_SNAPSHOT:
+		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT_RESULT) {
+			break;
+		}
+		sm_move(leader, LS_FOLLOWER_WAS_NOTIFIED);
+		break;
 	case LS_FOLLOWER_WAS_NOTIFIED:
 		switch (msg->type) {
 		case RAFT_IO_SIGNATURE:
 			PRE(snapshot_state->db == NULL &&
 			    snapshot_state->stmt == NULL);
 
-			// TODO probably we need to use callbacks here to send the messages
-			// after inserting in SQLite.
-			async_create_ht_db_and_stmt(snapshot_state);
-			async_insert_checksums(snapshot_state,
-					       msg->signature.cs,
-					       msg->signature.cs_nr);
-			sm_move(leader, LS_SIGNATURES_CALC_STARTED);
-			POST(snapshot_state->db != NULL &&
-			     snapshot_state->stmt != NULL);
+			async_create_ht_and_insert(snapshot_state, msg->signature.cs, msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
+			// TODO this two should happen in order.
+			// sm_move(leader, LS_SIGNATURES_CALC_STARTED);
+			/* POST(snapshot_state->db != NULL &&
+			     snapshot_state->stmt != NULL);*/
+			// TODO: send RAFT_IO_SIGNATURE_RESULT.
 			break;
 		}
 		break;
@@ -461,10 +518,10 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 			PRE(snapshot_state->db != NULL &&
 			    snapshot_state->stmt != NULL);
 
-			async_insert_checksums(snapshot_state,
-					       msg->signature.cs,
-					       msg->signature.cs_nr);
-			// sendSignatureResponse();
+			async_insert_checksums(snapshot_state, msg->signature.cs,
+					msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
+			// TODO other state transition.
+			// TODO: send RAFT_IO_SIGNATURE_RESULT.
 			break;
 		}
 		break;
