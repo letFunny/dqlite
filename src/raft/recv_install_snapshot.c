@@ -512,6 +512,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 			    snapshot_state->ht_stmt == NULL);
 
 			// TODO: control that we do not move from stale state on async callback.
+			// what happens if we finish the async callback after we received another message.
 			async_create_ht_and_insert(snapshot_state, msg->signature.cs, msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
 			// TODO: send RAFT_IO_SIGNATURE_RESULT.
 			break;
@@ -554,27 +555,6 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 
 	struct snapshot_state *state =
 		CONTAINER_OF(sm, struct snapshot_state, sm);
-
-	// State transitions. TODO this is duplicated, we need the proper checks.
-	/* rv = CHECK(ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
-		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
-	      ERGO(sm_state(sm) == LS_FOLLOWER_WAS_NOTIFIED,
-		   prev_state == LS_FOLLOWER_NEEDS_SNAPSHOT) &&
-	      ERGO(sm_state(sm) == LS_SIGNATURES_CALC_STARTED,
-		   prev_state == LS_FOLLOWER_WAS_NOTIFIED ||
-			   prev_state == LS_SIGNATURES_CALC_STARTED) &&
-	      ERGO(sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED,
-		   prev_state == LS_SIGNATURES_CALC_STARTED) &&
-	      ERGO(sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT,
-		   prev_state == LS_SNAPSHOT_INSTALLATION_STARTED) &&
-	      ERGO(sm_state(sm) == LS_SNAPSHOT_DONE_SENT,
-		   prev_state == LS_SNAPSHOT_CHUNCK_SENT) &&
-	      ERGO(sm_state(sm) == LS_FOLLOWER_ONLINE,
-		   prev_state == LS_SNAPSHOT_DONE_SENT ||
-			   prev_state == LS_SNAPSHOT_DONE_SENT));*/
-	/*if (!rv) {
-		return false;
-	}*/
 
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
