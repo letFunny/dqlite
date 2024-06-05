@@ -25,13 +25,13 @@
  *
  * =Data structures
  *
- * Among other structures it's needed to introduce a (persistent)
- * container `HT` to efficiently store and map checksums to their page
- * numbers on the follower's side. HT is implemented on top of sqlite3
- * database with unix VFS. Every database corresponds to a
- * raft-related database and maintains the following schema:
+ * Among other structures it's needed to introduce a (persistent) container
+ * `HT` to efficiently store and map checksums to their page numbers on both
+ * the leader's and  follower's side. HT is implemented on top of sqlite3
+ * database with unix VFS. Every database corresponds to a raft-related
+ * database and maintains the following schema:
  *
- * CREATE TABLE "map" ("checksum" INTEGER NOT NULL, "pageno" INTEGER NOT NULL)
+ * CREATE TABLE "map" ("checksum" INTEGER NOT NULL, "pageno" INTEGER NOT NULL UNIQUE)
  * CREATE INDEX map_idx on map(checksum);
  *
  * Each database stores a mapping from checksum to page number. This
@@ -42,65 +42,58 @@
 /**
  * =Operation
  *
- * 0. Leader creates one state machine per Follower to track of their
- * states and moves it to FOLLOWER_ONLINE state. Follower creates a
- * state machine to track of its states and moves it to NORMAL state.
+ * 0. Leader creates one state machine per Follower to track of their states
+ * and moves it to FOLLOWER_ONLINE state. Follower creates a state machine to
+ * keep track of its states and moves it to NORMAL state.
  *
- * 1. The Leader learns the Follower’s follower.lastLogIndex during
- * receiving replies on AppendEntries() RPC, fails to find
- * follower.lastLogIndex in its RAFT log or tries and fails to
- * construct an AppendEntries() message because of the WALs that
- * contained some necessary frames has been rotated out, and
- * understands that the snapshot installation procedure is
- * required.
+ * 1. The Leader learns the Follower’s follower.lastLogIndex during receiving
+ * replies on AppendEntries() RPC, fails to find follower.lastLogIndex in its
+ * RAFT log or tries and fails to construct an AppendEntries() message because
+ * of the WAL that contained some necessary frames has been rotated out, and
+ * understands that the snapshot installation procedure is required.
  *
- * Leader calls leader_tick() putting struct raft_message as a
- * parameter which logic moves it from FOLLOWER_ONLINE to
- * FOLLOWER_NEEDS_SNAPSHOT state.
+ * Leader calls leader_tick() putting struct raft_message as a parameter which
+ * logic moves it from FOLLOWER_ONLINE to FOLLOWER_NEEDS_SNAPSHOT state.
  *
- * 2. The Leader initiates snapshot installation by sending
+ * 2. The Leader initiates the snapshot installation by sending
  * InstallSnapshot() message.
  *
- * Upon receiving this message on the Follower's side, Follower calls
- * follower_tick() putting struct raft_message as a parameter which
- * logic moves it from NORMAL to SIGNATURES_CALC_STARTED state.
+ * 3. Upon receiving this message on the Follower's side, Follower calls
+ * follower_tick() putting struct raft_message as a parameter which logic moves
+ * it from NORMAL to SIGNATURES_CALC_STARTED state. The Follower then creates
+ * its HT and starts calculating checksums and recording them. Once finished it
+ * sends the leader the InstallSnapshotResult() message and the Leader moves to
+ * SIGNATURES_CALC_STARTED and creates its HT.
  *
- * 3. The Follower calculates [page_checksum_t] for its local
- * persistent state. When this process ends it puts itself into
- * SIGNATURES_CALC_DONE state by calling follower_tick(..., NULL).
+ * 3. The Leader sends Signature() messages to the Follower containing the page
+ * range for which we want to get the checksums.
  *
- * 4. The Follower sends Signature() messages to the Leader, transfers
- * the whole [page_checksum_t] and puts itself into
- * SIGNATURES_PART_SENT state. When all signatures transferred the
- * Leader, it sends Signature(done=true) message.
+ * The Follower sends the requested checksums in a SignatureResult() message
+ * back to the Leader and the leader puts incomming payloads of Signature()
+ * message into the HT.
  *
- * 5. When the Leader received the first Signature() message it moves
- * corresponding state machine into SIGNATURES_CALC_STARTED state and
- * creates HT. The Leader puts incomming payloads of Signature()
- * message into the HT. When the Leader received Signature(done=true)
- * message it moves into SNAPSHOT_INSTALLATION_STARTED state.
+ * 4. When the follower sends the checksum of its highest numbered page to the
+ * Leader, it sends the SignatureResult() message using the done=true flag,
+ * upon receiving it the Leader moves into SNAPSHOT_INSTALLATION_STARTED state.
  *
- * 6. In SNAPSHOT_INSTALLATION_STARTED state, the Leader starts
- * iterating over the local persistent state, and calculates the
- * checksum for each page the state has. Then, it tries to find the
- * checksum it calculated in HT. Based on the result of this
- * calculation, the Leader sends InstallShapshot(CP..) or
+ * 5. In SNAPSHOT_INSTALLATION_STARTED state, the Leader starts iterating over
+ * the local persistent state, and calculates the checksum for each page the
+ * state has. Then, it tries to find the checksum it calculated in HT. Based on
+ * the result of this calculation, the Leader sends InstallShapshot(CP..) or
  * InstallShapshot(MV..) to the Follower.
  *
- * Upon receving these messages the Follower moves into
- * SNAPSHOT_CHUNCK_RECEIVED state. The Leader moves into
- * SNAPSHOT_CHUNCK_SENT state after receiving first reply from the
- * Follower.
+ * Upon receving these messages, the Follower moves into
+ * SNAPSHOT_CHUNCK_RECEIVED state. The Leader moves into SNAPSHOT_CHUNCK_SENT
+ * state after receiving first reply from the Follower.
  *
- * 7. When the iteration has finished the Leader sends
- * InstallShapshot(..., done=true) message to the Follower. It moves
- * the Follower back to NORMAL state and the state machine
- * corresponding to the Follower on the Leader is moved to
- * SNAPSHOT_DONE_SENT state.
+ * 6. When the iteration has finished the Leader sends
+ * InstallShapshot(..., done=true) message to the Follower. It moves the
+ * Follower back to NORMAL state and the state machine corresponding to the
+ * Follower on the Leader is moved to SNAPSHOT_DONE_SENT state.
  *
- * 8. The Leader sends AppendEntries() RPC to the Follower and
- * restarts the algorithm from (1). The Leader's state machine is
- * being moved to FOLLOWER_ONLINE state.
+ * 7. The Leader sends AppendEntries() RPC to the Follower and restarts the
+ * algorithm from (1). The Leader's state machine is being moved to
+ * FOLLOWER_ONLINE state.
  *
  * =Failure model
  *
@@ -127,92 +120,95 @@
  *   doesn't match it's own, the communication get's restarted from
  *   the lowest known index.
  *
+ * If a reply is not received the Leader will eventually timeout and retry
+ * sending the same message.
+ *
  * ==Crashes of the Leader and Follower.
  *
- * @TODO: We'd need to review other options here.
+ * Crashes of the Leader are handled by Raft when a new leader is elected
+ * and the snapshot process is restarted.
  *
- * The Follower maintains persistent bootcounter variable incremented
- * every time during process start and sends it back to the Leader as
- * a part of heart bit in AppendEntriesResult() message.
+ * If the Follower receives an message which is not expected in the Follower's
+ * current state, the Follower will reply using the message's result RPC
+ * setting the unexpected=true flag. This response suggests the Leader to
+ * restart the snapshot installation procedure.
  *
- * Bootcounters are being used to restart snapshot installation
- * procedures crashed in the middle of their execution on the Leaders'
- * and Follower's sides.  When Leader notices that bootcounter changed
- * it restarts snapshot installation and moves its state machine to
- * FOLLOWER_ONLINE state, starting over the scenario described in
- * "Operation" section.
+ * In particular, if the follower crashes it will restart its state machine to
+ * the NORMAL state and reply using the unexpected=true flag for any messages
+ * not expected in the NORMAL state, suggesting the Leader to restart the
+ * procedure.
  *
  * =State model
  *
  * Definitions:
  *
  * Rf -- raft index sent in AppendEntriesResult() from Follower to Leader
- * Bf -- bootcounter sent in AppendEntriesResult() from Follower to Leader
  * Tf -- Follower's term sent in AppendEntriesResult() from Follower to Leader
  *
  * Tl -- Leader's term
  * Rl -- raft index of the Leader
- * Bl -- bootcounter of the Follower_i saved in Leader's volatile state
  *
- * Leader's state machine:
+  * Leader's state machine:
  *
- *					AppendEntriesResult() received
- *					raft_log.find(Rf) == "FOUND"
- *                                         -----------+
- * +---------------------> FOLLOWER_ONLINE <----------+
- * |  AppendEntriesResult()      |
- * | received, Bf>Bl && Rf<<Rl   | AppendEntriesResult() received
- * | raft_log.find(Rf) == ENOENT V Rf << Rl && raft_log.find(Rf) == "ENOENTRY"
- * | 	+----------> FOLLOWER_NEEDS_SNAPSHOT
- * | 	|			 |
- * | 	|			 | InstallSnapshotResult() received
- * | 	|			 V
- * | 	+----------- FOLLOWER_WAS_NOTIFIED
- * | 	|			 |
- * | 	|			 | Signature() received
- * | 	|			 V
- * | 	+---------- SIGNATURES_CALC_STARTED  -------+ SignatureResult() received
- * | 	|			 |           <------+
- * | 	|			 | Signature(done=true) received
- * | 	|			 V
- * | 	+--------- SNAPSHOT_INSTALLATION_STARTED
- * | 	|			 |
- * | 	|			 | CP_Result()/MV_Result() received
- * | 	|			 V
- * | 	+------------- SNAPSHOT_CHUNCK_SENT -------+ CP_Result()/MV_Result()
- * | 	|			 |          <------+       received
- * | 	|			 | Raw snapshot iteration done
- * | 	|			 V
- * | 	+ ------------ SNAPSHOT_DONE_SENT
- * | 				 | InstallSnapshotResult() received
- * +-----------------------------+
+ * +---------------------------------+
+ * |                                 |     AppendEntriesResult() received
+ * |        *Result(unexpected=true) |     raft_log.find(Rf) == "FOUND"
+ * |        received                 |      +------------+
+ * |        +---------------> FOLLOWER_ONLINE <----------+
+ * |        |                        |
+ * |        |                        | AppendEntriesResult() received
+ * |        |                        V Rf << Rl && raft_log.find(Rf) == "ENOENTRY"
+ * |        +------------- FOLLOWER_NEEDS_SNAPSHOT
+ * |        |                        |
+ * |        |                        | InstallSnapshotResult() received
+ * |        |                        V
+ * |        +------------ SIGNATURES_CALC_STARTED  -------+ SignatureResult() received
+ * |        |                        |             <------+
+ * |        |                        | SignatureResult(done=true) received
+ * |        |                        V
+ * |        +----------- SNAPSHOT_INSTALLATION_STARTED
+ * |        |                        |
+ * |        |                        | CP_Result()/MV_Result() received
+ * |        |                        V
+ * |        +--------------- SNAPSHOT_CHUNCK_SENT -------+ CP_Result()/MV_Result()
+ * |        |                        |            <------+  received
+ * |        |                        | Raw snapshot iteration done
+ * |        |                        V
+ * |        +--------------- SNAPSHOT_DONE_SENT
+ * |                                 | InstallSnapshotResult() received
+ * +---------------------------------+
  *
  * Follower's state machine:
  *
- *	+-------------------> NORMAL
- *      |     	+----------->   |
- *	|   (@)	|		| InstallSnapshot() received
- *	|	|		V
- *	|	+--- SIGNATURES_CALC_STARTED
- *	|	|		|
- *	|	|		| Signatures for all db pages
- *	|	|		|    have been calculated.
- *	|	|		V
- *	|	+---- SIGNATURES_CALC_DONE
- *	|	|		|
- *	|	|		| First Signature() sent
- *	|	|		V
- *	|	+---- SIGNATURES_PART_SENT ---------+ SignatureResult() received
- *	|	|		|          <--------+ Signature() sent
- *	|	|		| CP()/MV() received
- *	|	|		V
- *	|	+--- SNAPSHOT_CHUNCK_RECEIVED -------+ CP()/MV() received
- *	|			|             <------+
- *	|			| InstallSnapshot(done=true) received
- *	+-----------------------+
+ *                            +------+ (%)
+ * +-------------------> NORMAL <----+
+ * |       +----------->   |
+ * |       |               | InstallSnapshot() received
+ * |       |               V
+ * |       +--- SIGNATURES_CALC_STARTED
+ * |       |               |
+ * |       |               | Signatures for all db pages have been calculated.
+ * |       |               | InstallSnapshotResult() sent.
+ * |       |               V
+ * |       +---- SIGNATURES_CALC_DONE
+ * |       |               |
+ * |       |               | First SignatureResult() sent
+ * |       |               V
+ * |       +---- SIGNATURES_PART_SENT ---------+ Signature() received
+ * |       |               |          <--------+ SignatureResult() sent
+ * |       |               |
+ * |       |               | CP()/MV() received
+ * |       |               V
+ * |       +--- SNAPSHOT_CHUNCK_RECEIVED -------+ CP()/MV() received
+ * |    (@ || %)           |             <------+
+ * |                       | InstallSnapshot(done=true) received
+ * +-----------------------+
  *
  * (@) -- AppendEntries() received && Tf < Tl
+ * (%) -- Signature()/CP()/MV() received and in the current state receving a
+ *        message of such type is unexpected. *Result(unexpected=true) sent.
  */
+
 
 enum follower_states {
 	FS_NORMAL,
@@ -227,15 +223,28 @@ static const struct sm_conf follower_states[FS_NR] = {
 	[FS_NORMAL] = {
 		.flags = SM_INITIAL | SM_FINAL,
 		.name = "normal",
-		.allowed = BITS(FS_SIGNATURES_CALC_STARTED),
+		.allowed = BITS(FS_SIGNATURES_CALC_STARTED)|BITS(FS_NORMAL),
 	},
-/*	[PS_DRAINING] = {
-	    .name = "draining",
-	    .allowed = BITS(PS_DRAINING)
-		     | BITS(PS_NOTHING)
-		     | BITS(PS_BARRIER),
+	[FS_SIGNATURES_CALC_STARTED] = {
+		.flags = 0,
+		.name = "signatures_calc_started",
+		.allowed = BITS(FS_SIGNATURES_CALC_DONE)|BITS(FS_NORMAL),
 	},
-*/
+	[FS_SIGNATURES_CALC_DONE] = {
+		.flags = 0,
+		.name = "signatures_calc_done",
+		.allowed = BITS(FS_SIGNATURES_PART_SENT)|BITS(FS_NORMAL),
+	},
+	[FS_SIGNATURES_PART_SENT] = {
+		.flags = 0,
+		.name = "signatures_part_sent",
+		.allowed = BITS(FS_SNAPSHOT_CHUNCK_RECEIVED)|BITS(FS_NORMAL),
+	},
+	[FS_SNAPSHOT_CHUNCK_RECEIVED] = {
+		.flags = 0,
+		.name = "snapshot_chunk_received",
+		.allowed = BITS(FS_NORMAL),
+	},
 };
 
 __attribute__((unused)) void follower_tick(struct sm *follower,
@@ -260,7 +269,6 @@ __attribute__((unused)) static bool follower_invariant(const struct sm *m,
 enum leader_states {
 	LS_FOLLOWER_ONLINE,
 	LS_FOLLOWER_NEEDS_SNAPSHOT,
-	LS_FOLLOWER_WAS_NOTIFIED,
 	LS_SIGNATURES_CALC_STARTED,
 	LS_SNAPSHOT_INSTALLATION_STARTED,
 	LS_SNAPSHOT_CHUNCK_SENT,
@@ -272,37 +280,32 @@ static const struct sm_conf leader_states[LS_NR] = {
 	[LS_FOLLOWER_ONLINE] = {
 		.flags = SM_INITIAL | SM_FINAL,
 		.name = "online",
-		.allowed = BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_FOLLOWER_NEEDS_SNAPSHOT)|BITS(LS_FOLLOWER_ONLINE),
 	},
 	[LS_FOLLOWER_NEEDS_SNAPSHOT] = {
 		.flags = 0,
 		.name = "needs_snapshot",
-		.allowed = BITS(LS_FOLLOWER_WAS_NOTIFIED),
-	},
-	[LS_FOLLOWER_WAS_NOTIFIED] = {
-		.flags = 0,
-		.name = "follower_notified",
-		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_FOLLOWER_ONLINE),
 	},
 	[LS_SIGNATURES_CALC_STARTED] = {
 		.flags = 0,
-		.name = "signature_calc_started",
-		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_SNAPSHOT_INSTALLATION_STARTED)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.name = "signatures_calc_started",
+		.allowed = BITS(LS_SIGNATURES_CALC_STARTED)|BITS(LS_SNAPSHOT_INSTALLATION_STARTED)|BITS(LS_FOLLOWER_ONLINE),
 	},
 	[LS_SNAPSHOT_INSTALLATION_STARTED] = {
 		.flags = 0,
 		.name = "installation_started",
-		.allowed = BITS(LS_SNAPSHOT_CHUNCK_SENT)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_SNAPSHOT_CHUNCK_SENT)|BITS(LS_FOLLOWER_ONLINE),
 	},
 	[LS_SNAPSHOT_CHUNCK_SENT] = {
 		.flags = 0,
 		.name = "chuck_sent",
-		.allowed = BITS(LS_SNAPSHOT_DONE_SENT)|BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_SNAPSHOT_DONE_SENT)|BITS(LS_FOLLOWER_ONLINE),
 	},
 	[LS_SNAPSHOT_DONE_SENT] = {
 		.flags = 0,
 		.name = "done_send",
-		.allowed = BITS(LS_FOLLOWER_NEEDS_SNAPSHOT),
+		.allowed = BITS(LS_FOLLOWER_ONLINE),
 	},
 };
 

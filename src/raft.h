@@ -300,6 +300,89 @@ struct raft_install_snapshot
 };
 #define RAFT_INSTALL_SNAPSHOT_VERSION 0
 
+typedef unsigned int checksum_t;
+typedef unsigned long int pageno_t;
+
+struct page_checksum_t {
+	pageno_t   page_no;
+	checksum_t checksum;
+};
+
+struct page_from_to {
+	pageno_t from;
+	pageno_t to;
+};
+
+enum raft_result {
+	OK = 0,
+	UNEXPECTED = 1,
+	DONE = 2,
+};
+
+struct raft_install_snapshot_result {
+	int version;
+
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_RESULT_VERSION 0
+
+
+struct raft_signature {
+	int version;
+
+	const char *db;
+	struct page_from_to page_from_to;
+	unsigned int cs_page_no;
+};
+#define RAFT_SIGNATURE_VERSION 0
+
+struct raft_signature_result {
+	int version;
+
+	const char *db;
+	struct page_checksum_t *cs;
+	unsigned int cs_nr;
+	unsigned int cs_page_no;
+	enum raft_result result;
+};
+#define RAFT_SIGNATURE_RESULT_VERSION 0
+
+struct raft_install_snapshot_mv {
+	int version;
+
+	const char *db;
+	struct page_from_to *mv;
+	unsigned int mv_nr;
+};
+#define RAFT_INSTALL_SNAPSHOT_MV_VERSION 0
+
+struct raft_install_snapshot_mv_result {
+	int version;
+
+	const char *db;
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_MV_RESULT_VERSION 0
+
+struct raft_install_snapshot_cp {
+	int version;
+
+	const char *db;
+	pageno_t page_no;
+	struct raft_buffer page_data;
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_CP_VERSION 0
+
+struct raft_install_snapshot_cp_result {
+	int version;
+
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_CP_RESULT_VERSION 0
+
 /**
  * Hold the arguments of a TimeoutNow RPC.
  *
@@ -314,70 +397,6 @@ struct raft_timeout_now
 	raft_index last_log_term;  /* Term of log entry at last_log_index. */
 };
 #define RAFT_TIMEOUT_NOW_VERSION 0
-
-typedef unsigned int checksum_t;
-typedef unsigned long int pageno_t;
-
-struct page_checksum_t {
-	pageno_t   page_no;
-	checksum_t checksum;
-};
-
-struct raft_install_snapshot_result {
-	int version;
-
-	const char *db;
-};
-
-struct raft_signature {
-	int version;
-
-	struct page_checksum_t *cs;
-	unsigned int cs_nr;
-	unsigned int cs_page_no;
-	const char *db;
-	int done;
-};
-
-struct raft_signature_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
-struct page_from_to {
-	pageno_t from;
-	pageno_t to;
-};
-
-struct raft_install_snapshot_mv {
-	int version;
-
-	struct page_from_to *mv;
-	unsigned int mv_nr;
-	const char *db;
-};
-
-struct raft_install_snapshot_mv_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
-struct raft_install_snapshot_cp {
-	int version;
-
-	const char *db;
-	pageno_t page_no;
-	struct raft_buffer page_data;
-};
-
-struct raft_install_snapshot_cp_result {
-	int version;
-	pageno_t last_known_page_no; /* used for retries and message losses */
-	int result;
-};
-
 
 /**
  * Type codes for RPC messages.
@@ -433,10 +452,14 @@ struct raft_message
 		struct raft_append_entries append_entries;
 		struct raft_append_entries_result append_entries_result;
 		struct raft_install_snapshot install_snapshot;
-		struct raft_timeout_now timeout_now;
 		struct raft_install_snapshot_result install_snapshot_result;
 		struct raft_signature signature;
 		struct raft_signature_result signature_result;
+		struct raft_install_snapshot_cp install_snapshot_cp;
+		struct raft_install_snapshot_cp_result install_snapshot_cp_result;
+		struct raft_install_snapshot_mv install_snapshot_mv;
+		struct raft_install_snapshot_mv_result install_snapshot_mv_result;
+		struct raft_timeout_now timeout_now;
 	};
 };
 
@@ -707,51 +730,6 @@ struct raft_transfer; /* Forward declaration */
 
 struct raft_log;
 
-struct raft_follower_state {
-	unsigned
-		randomized_election_timeout; /* Timer expiration. */
-	struct /* Current leader info. */
-	{
-		raft_id id;
-		char *address;
-	} current_leader;
-	uint64_t append_in_flight_count;
-	uint64_t reserved[7]; /* Future use */
-	struct sm *snapshot_sm; /* Follower's state machine used for snapshots. */
-};
-
-struct raft_candidate_state {
-	unsigned
-		randomized_election_timeout; /* Timer expiration. */
-	bool *votes;                     /* Vote results. */
-	bool disrupt_leader;  /* For leadership transfer */
-	bool in_pre_vote;     /* True in pre-vote phase. */
-	uint64_t reserved[8]; /* Future use */
-};
-struct raft_leader_state {
-	struct raft_progress
-		*progress; /* Per-server replication state. */
-	struct raft_change
-		*change;         /* Pending membership change. */
-	raft_id promotee_id; /* ID of server being promoted. */
-	unsigned short round_number; /* Current sync round. */
-	raft_index
-		round_index; /* Target of the current round. */
-	raft_time round_start; /* Start of current round. */
-	queue requests; /* Outstanding client requests. */
-	uint32_t
-		voter_contacts; /* Current number of voting nodes we
-				   are in contact with */
-	uint32_t reserved2; /* Future use */
-	uint64_t reserved[7]; /* Future use */
-	// TODO see comment below, this should probably store the id and
-	// have similar functions to raft_configuration.
-	struct {
-		raft_id id;
-		struct sm *sm; /* For each follower, state machine used for snapshots. */
-	} *snapshot_sms;
-	unsigned n_snapshot_sms; /* Number of state machines. */
-};
 
 /**
  * Hold and drive the state of a single raft server in a cluster.
@@ -889,10 +867,45 @@ struct raft
 	 */
 	unsigned short state;
 	union {
-		// TODO export the rest for uniformity.
-		struct raft_follower_state follower_state;
-		struct raft_candidate_state candidate_state;
-		struct raft_leader_state leader_state;
+		struct /* Follower */
+		{
+			unsigned
+			    randomized_election_timeout; /* Timer expiration. */
+			struct /* Current leader info. */
+			{
+				raft_id id;
+				char *address;
+			} current_leader;
+			uint64_t append_in_flight_count;
+			uint64_t reserved[7]; /* Future use */
+		} follower_state;
+		struct
+		{
+			unsigned
+			    randomized_election_timeout; /* Timer expiration. */
+			bool *votes;                     /* Vote results. */
+			bool disrupt_leader;  /* For leadership transfer */
+			bool in_pre_vote;     /* True in pre-vote phase. */
+			uint64_t reserved[8]; /* Future use */
+		} candidate_state;
+		struct
+		{
+			struct raft_progress
+			    *progress; /* Per-server replication state. */
+			struct raft_change
+			    *change;         /* Pending membership change. */
+			raft_id promotee_id; /* ID of server being promoted. */
+			unsigned short round_number; /* Current sync round. */
+			raft_index
+			    round_index; /* Target of the current round. */
+			raft_time round_start; /* Start of current round. */
+			queue requests; /* Outstanding client requests. */
+			uint32_t
+			    voter_contacts; /* Current number of voting nodes we
+					       are in contact with */
+			uint32_t reserved2; /* Future use */
+			uint64_t reserved[7]; /* Future use */
+		} leader_state;
 	};
 
 	/* Election timer start.
@@ -947,16 +960,6 @@ struct raft
 
 	/* Future extensions */
 	uint64_t reserved[31];
-
-	// struct sm *snapshot_sm;
-	// TODO this should be similar to raft_configuration and contain a list
-	// indexed by server id with the necessary functions (add, get, delete,
-	// init, close).
-	// We could add it to raft_configuration because the sm should exist for
-	// each server anyway (is that true?).
-	// unsigned n_snapshot_sm;
-	// TODO si está en raft_configuration va a estar también en los followers lo
-	// que no tiene sentido.
 };
 
 RAFT_API int raft_init(struct raft *r,
