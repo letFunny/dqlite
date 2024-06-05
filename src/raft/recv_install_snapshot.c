@@ -316,7 +316,7 @@ static bool log_index_not_found(struct raft *r, raft_index follower_index)
 }
 
 struct insert_checksum_data {
-	struct snapshot_state *state;
+	struct snapshot_leader_state *state;
 	struct page_checksum_t *cs;
 	unsigned int cs_nr;
 	int next_state;
@@ -330,7 +330,7 @@ static int insert_checksums(struct raft_io_async_work *req)
 	sqlite3_stmt *stmt = data->state->ht_stmt;
 	for (unsigned int i = 0; i < data->cs_nr; i++) {
 		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].checksum);
-		// TODO should this be asserts?
+		// TODO Instead of asserts, if we fail we send message unexpected=true and restart our sm, right?
 		assert(rv == SQLITE_OK);
 		rv = sqlite3_bind_int(stmt, 2, (int)data->cs[i].page_no);
 		assert(rv == SQLITE_OK);
@@ -351,7 +351,7 @@ static void async_insert_checksums_cb(struct raft_io_async_work *req, int status
 	raft_free(req);
 }
 
-static void async_insert_checksums(struct snapshot_state *state,
+static void async_insert_checksums(struct snapshot_leader_state *state,
 				   struct page_checksum_t *cs,
 				   unsigned int cs_nr,
 				   int next_state)
@@ -377,7 +377,7 @@ static void async_insert_checksums(struct snapshot_state *state,
 }
 
 struct create_ht_data {
-	struct snapshot_state *state;
+	struct snapshot_leader_state *state;
 	int next_state;
 };
 
@@ -389,7 +389,7 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 	int rv;
 
 	struct create_ht_data *data = (struct create_ht_data *)req->data;
-	struct snapshot_state *state = data->state;
+	struct snapshot_leader_state *state = data->state;
 	sprintf(db_filename, "ht-%lld", state->follower_id);
 	rv = UvOsUnlink(db_filename);
 	assert(rv == 0 || errno == ENOENT);
@@ -419,7 +419,7 @@ static void async_create_ht_cb(struct raft_io_async_work *req, int status) {
 	raft_free(req);
 }
 
-static void async_create_ht(struct snapshot_state *state, int next_state)
+static void async_create_ht(struct snapshot_leader_state *state, int next_state)
 {
 	struct create_ht_data *data;
 	data = raft_malloc(sizeof *data);
@@ -452,8 +452,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 	assert(leader != NULL);
 	assert(msg != NULL);
 
-	struct snapshot_state *snapshot_state =
-		CONTAINER_OF(leader, struct snapshot_state, sm);
+	struct snapshot_leader_state *snapshot_state =
+		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
 	struct raft *r = snapshot_state->r;
 	assert(snapshot_state != NULL && r != NULL);
 
@@ -468,12 +468,10 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		}
 		raft_index follower_index =
 			msg->append_entries_result.last_log_index;
-		// Follower needs an entry which is not
-		// on the Raft log anymore.
 		if (log_index_not_found(r, follower_index)) {
-			// TODO: send RAFT_IO_INSTALL_SNAPSHOT.
+			// Follower needs an entry which is not on the Raft log anymore.
 			sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
-			// TODO: counter tracking in receiver and sender for pages to resend pages.
+			// TODO: send RAFT_IO_INSTALL_SNAPSHOT.
 		} else {
 			sm_move(leader, LS_FOLLOWER_ONLINE);
 		}
@@ -517,8 +515,8 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	// state thanto pass it.
 	// TODO What happens when nodes join the cluster.
 
-	struct snapshot_state *state =
-		CONTAINER_OF(sm, struct snapshot_state, sm);
+	struct snapshot_leader_state *state =
+		CONTAINER_OF(sm, struct snapshot_leader_state, sm);
 
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
@@ -536,7 +534,7 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	return true;
 }
 
-void snapshot_state_init(struct snapshot_state *state, struct raft *r, raft_id follower_id) {
+void snapshot_leader_state_init(struct snapshot_leader_state *state, struct raft *r, raft_id follower_id) {
 	state->r = r;
 	state->follower_id = follower_id;
 	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);

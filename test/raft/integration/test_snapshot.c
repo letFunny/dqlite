@@ -910,8 +910,8 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 
 	struct raft *raft_leader = raft_fixture_get(&f->cluster, 0);
 	struct raft *raft_follower = raft_fixture_get(&f->cluster, 1);
-	struct snapshot_state state = {};
-	snapshot_state_init(&state, raft_leader, raft_follower->id);
+	struct snapshot_leader_state state = {};
+	snapshot_leader_state_init(&state, raft_leader, raft_follower->id);
 
 	/* Node 0 is the leader. */
 	CLUSTER_DEPOSE;

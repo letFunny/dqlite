@@ -7,7 +7,7 @@
 
 #include "../raft.h"
 
-struct snapshot_state {
+struct snapshot_leader_state {
 	struct sm sm;
 	raft_id follower_id;
 	sqlite3 *ht;
@@ -19,7 +19,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg);
 
 void follower_tick(struct sm *follower, const struct raft_message *msg);
 
-void snapshot_state_init(struct snapshot_state *state, struct raft *r, raft_id follower_id);
+void snapshot_leader_state_init(struct snapshot_leader_state *state, struct raft *r, raft_id follower_id);
 
 /* Process an InstallSnapshot RPC from the given server. */
 int recvInstallSnapshot(struct raft *r,
