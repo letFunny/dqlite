@@ -356,7 +356,6 @@ static void async_insert_checksums(struct snapshot_state *state,
 				   unsigned int cs_nr,
 				   int next_state)
 {
-	// TODO malloc.
 	struct insert_checksum_data *data;
 	data = raft_malloc(sizeof(*data));
 	assert(data != NULL);
@@ -377,9 +376,9 @@ static void async_insert_checksums(struct snapshot_state *state,
 	state->r->io->async_work(state->r->io, work, async_insert_checksums_cb);
 }
 
-struct create_ht_and_stmt_data {
+struct create_ht_data {
 	struct snapshot_state *state;
-	struct insert_checksum_data insert_checksum_data;
+	int next_state;
 };
 
 static int create_ht_and_stmt(struct raft_io_async_work *req)
@@ -389,7 +388,7 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 	char *err_msg;
 	int rv;
 
-	struct create_ht_and_stmt_data *data = (struct create_ht_and_stmt_data *)req->data;
+	struct create_ht_data *data = (struct create_ht_data *)req->data;
 	struct snapshot_state *state = data->state;
 	sprintf(db_filename, "ht-%lld", state->follower_id);
 	rv = UvOsUnlink(db_filename);
@@ -409,53 +408,35 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 				&state->ht_stmt, NULL);
 	assert(rv == SQLITE_OK);
 
-	data->insert_checksum_data.state->ht_stmt = state->ht_stmt;
+	sm_move(&data->state->sm, data->next_state);
 	return SQLITE_OK;
 }
 
-static void create_ht_and_stmt_cb(struct raft_io_async_work *req, int status) {
-	int rv;
+static void async_create_ht_cb(struct raft_io_async_work *req, int status) {
+	(void)status;
 
-	if (status != SQLITE_OK) {
-		goto freemem;
-	}
-	struct create_ht_and_stmt_data *data = (struct create_ht_and_stmt_data *)req->data;
-	struct raft_io_async_work work = {
-		.data = &data->insert_checksum_data,
-	};
-	rv = insert_checksums(&work);
-	assert(rv == SQLITE_OK);
-
-freemem:
 	raft_free(req->data);
 	raft_free(req);
-	return;
 }
 
-static void async_create_ht_and_insert(struct snapshot_state *state,
-				   struct page_checksum_t *cs,
-				   unsigned int cs_nr,
-				   int next_state)
+static void async_create_ht(struct snapshot_state *state, int next_state)
 {
-	struct create_ht_and_stmt_data *create_ht_and_stmt_data;
-	create_ht_and_stmt_data = raft_malloc(sizeof *create_ht_and_stmt_data);
-	assert(create_ht_and_stmt_data != NULL);
-	create_ht_and_stmt_data->state = state;
-	create_ht_and_stmt_data->insert_checksum_data = (struct insert_checksum_data) {
+	struct create_ht_data *data;
+	data = raft_malloc(sizeof *data);
+	assert(data != NULL);
+	*data = (struct create_ht_data) {
 		.state = state,
-		.cs = cs,
-		.cs_nr = cs_nr,
 		.next_state = next_state,
-	};;
+	};
 
 	struct raft_io_async_work *work;
 	work = raft_malloc(sizeof *work);
 	assert(work != NULL);
 	*work = (struct raft_io_async_work) {
 		.work = create_ht_and_stmt,
-		.data = create_ht_and_stmt_data,
+		.data = data,
 	};
-	state->r->io->async_work(state->r->io, work, create_ht_and_stmt_cb);
+	state->r->io->async_work(state->r->io, work, async_create_ht_cb);
 }
 
 bool is_main_thread(void)
@@ -506,45 +487,25 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT_RESULT) {
 			break;
 		}
-		sm_move(leader, LS_FOLLOWER_WAS_NOTIFIED);
-		break;
-	case LS_FOLLOWER_WAS_NOTIFIED:
-		switch (msg->type) {
-		case RAFT_IO_SIGNATURE:
-			PRE(snapshot_state->ht == NULL &&
-			    snapshot_state->ht_stmt == NULL);
+		// TODO: control that we do not move from stale state on async callback.
+		// what happens if we finish the async callback after we received another message.
+		// TODO: send RAFT_IO_SIGNATURE_RESULT.
+		PRE(snapshot_state->ht == NULL && snapshot_state->ht_stmt == NULL);
 
-			// TODO: control that we do not move from stale state on async callback.
-			// what happens if we finish the async callback after we received another message.
-			async_create_ht_and_insert(snapshot_state, msg->signature.cs, msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
-			// TODO: send RAFT_IO_SIGNATURE_RESULT.
-			break;
-		}
+		async_create_ht(snapshot_state, LS_SIGNATURES_CALC_STARTED);
 		break;
 	case LS_SIGNATURES_CALC_STARTED:
-		switch (msg->type) {
-		case RAFT_IO_SIGNATURE:
-			PRE(snapshot_state->ht != NULL &&
-			    snapshot_state->ht_stmt != NULL);
-
-			async_insert_checksums(snapshot_state, msg->signature.cs,
-					msg->signature.cs_nr, LS_SIGNATURES_CALC_STARTED);
-			// TODO other state transition.
-			// TODO: send RAFT_IO_SIGNATURE_RESULT.
+		if (msg->type != RAFT_IO_SIGNATURE_RESULT) {
 			break;
 		}
+		PRE(snapshot_state->ht != NULL && snapshot_state->ht_stmt != NULL);
+
+		async_insert_checksums(snapshot_state, msg->signature_result.cs,
+				msg->signature_result.cs_nr, LS_SIGNATURES_CALC_STARTED);
+		// TODO: other state transition.
+		// TODO: send RAFT_IO_SIGNATURE_RESULT.
 		break;
 	}
-}
-
-int index_snapshot_sm(struct raft_leader_state *leader_state, raft_id id)
-{
-	for (int i = 0; i < (int)leader_state->n_snapshot_sms; i++) {
-		if (leader_state->snapshot_sms[i].id == id) {
-			return i;
-		}
-	}
-	return -1;
 }
 
 __attribute__((unused)) static bool leader_invariant(const struct sm *sm,

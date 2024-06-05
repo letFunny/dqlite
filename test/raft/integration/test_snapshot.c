@@ -945,12 +945,13 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 			.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
 			.server_id = raft_follower->id,
 		};
-		struct raft_install_snapshot_result install_snapshot_result = {
-			// TODO snapshot should not carry a db field.
-			.db = "db",
-		};
+		struct raft_install_snapshot_result install_snapshot_result = { 0 };
 		msg.install_snapshot_result = install_snapshot_result;
 		leader_tick(&state.sm, &msg);
+		CLUSTER_STEP_UNTIL_ELAPSED(500);
+
+		munit_assert_not_null(state.ht);
+		munit_assert_not_null(state.ht_stmt);
 	}
 
 	struct page_checksum_t cs[3] = {
@@ -960,20 +961,18 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	};
 	{
 		struct raft_message msg = {
-			.type = RAFT_IO_SIGNATURE,
+			.type = RAFT_IO_SIGNATURE_RESULT,
 			.server_id = raft_follower->id,
 		};
-		struct raft_signature signature = {
+		struct raft_signature_result signature_result = {
 			.cs = cs,
 			.cs_nr = 2,
 			.cs_page_no = 1 /* TODO use this field */,
 			.db = "db",
 		};
-		msg.signature = signature;
+		msg.signature_result = signature_result;
 		leader_tick(&state.sm, &msg);
 		CLUSTER_STEP_UNTIL_ELAPSED(500);
-		munit_assert_not_null(state.ht);
-		munit_assert_not_null(state.ht_stmt);
 
 		struct page_checksum_t actual_cs[2];
 		get_checksums_ht(raft_follower->id, actual_cs, 2);
@@ -981,16 +980,16 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	}
 	{
 		struct raft_message msg = {
-			.type = RAFT_IO_SIGNATURE,
+			.type = RAFT_IO_SIGNATURE_RESULT,
 			.server_id = raft_follower->id,
 		};
-		struct raft_signature signature = {
+		struct raft_signature_result signature_result = {
 			.cs = cs + 2,
 			.cs_nr = 1,
 			.cs_page_no = 1,
 			.db = "db",
 		};
-		msg.signature = signature;
+		msg.signature_result = signature_result;
 		leader_tick(&state.sm, &msg);
 		CLUSTER_STEP_UNTIL_ELAPSED(500);
 		munit_assert_not_null(state.ht);
