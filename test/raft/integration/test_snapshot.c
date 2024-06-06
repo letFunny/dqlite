@@ -925,6 +925,10 @@ TEST(snapshot, basic, setUp, tearDown, 0, NULL) {
 	CLUSTER_SATURATE_BOTHWAYS(0, 2);
 	CLUSTER_SATURATE_BOTHWAYS(1, 2); TODO */
 
+	// Integration test: raft_fixture
+	// Unit test (vtable) + E2E test
+	// create_ht => set flag in the tests = true
+	// assert test flag = true
 	{
 		struct raft_message msg = {
 			.type = RAFT_IO_APPEND_ENTRIES_RESULT,

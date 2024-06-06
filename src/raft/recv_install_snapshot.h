@@ -7,13 +7,28 @@
 
 #include "../raft.h"
 
+// Forward declaration.
+struct snapshot_leader_state;
+
+struct leader_snapshot_io {
+	bool (*log_index_found)(void);
+	void (*async_create_ht)(struct snapshot_leader_state *state, int next_state);
+	bool (*send_message)(struct raft_message *msg);
+	// insert_checksum
+	// read_chunk
+	// send_message
+};
+
 struct snapshot_leader_state {
 	struct sm sm;
 	raft_id follower_id;
 	sqlite3 *ht;
 	sqlite3_stmt *ht_stmt;
-	struct raft *r;
+	struct leader_snapshot_io *io;
 };
+
+// TODO: Page reading from db on disk. Iterate in chunks and barriers in
+// the threadpool.
 
 void leader_tick(struct sm *leader, const struct raft_message *msg);
 

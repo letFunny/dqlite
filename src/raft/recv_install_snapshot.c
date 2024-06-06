@@ -309,6 +309,7 @@ static const struct sm_conf leader_states[LS_NR] = {
 	},
 };
 
+/*
 static bool log_index_not_found(struct raft *r, raft_index follower_index)
 {
 	return follower_index < logLastIndex(r->log) &&
@@ -437,7 +438,7 @@ static void async_create_ht(struct snapshot_leader_state *state, int next_state)
 		.data = data,
 	};
 	state->r->io->async_work(state->r->io, work, async_create_ht_cb);
-}
+}*/
 
 bool is_main_thread(void)
 {
@@ -454,8 +455,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 
 	struct snapshot_leader_state *snapshot_state =
 		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
-	struct raft *r = snapshot_state->r;
-	assert(snapshot_state != NULL && r != NULL);
+	struct leader_snapshot_io *io = snapshot_state->io;
+	assert(snapshot_state != NULL && io != NULL);
 
 	PRE(is_main_thread());
 	PRE(msg->server_id == snapshot_state->follower_id);
@@ -468,7 +469,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		}
 		raft_index follower_index =
 			msg->append_entries_result.last_log_index;
-		if (log_index_not_found(r, follower_index)) {
+		if (!io->log_index_found(r, follower_index)) {
 			// Follower needs an entry which is not on the Raft log anymore.
 			sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
 			// TODO: send RAFT_IO_INSTALL_SNAPSHOT.
@@ -490,6 +491,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		// TODO: send RAFT_IO_SIGNATURE_RESULT.
 		PRE(snapshot_state->ht == NULL && snapshot_state->ht_stmt == NULL);
 
+		// TODO: sem_move. Crate a mutex to sync.
 		async_create_ht(snapshot_state, LS_SIGNATURES_CALC_STARTED);
 		break;
 	case LS_SIGNATURES_CALC_STARTED:
@@ -531,6 +533,7 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 			return false;
 		}
 	}
+	// CHECK(flag); // I could define the range of chunks in memory.
 	return true;
 }
 
