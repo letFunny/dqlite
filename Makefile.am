@@ -226,14 +226,8 @@ libraft_la_CFLAGS = $(AM_CFLAGS)
 libraft_la_LDFLAGS = $(UV_LIBS)
 
 raft_core_unit_test_SOURCES = \
-  src/tracing.c \
-  src/raft/byte.c \
-  src/raft/compress.c \
-  src/raft/configuration.c \
-  src/raft/err.c \
-  src/raft/flags.c \
-  src/raft/heap.c \
-  src/raft/log.c \
+  $(basic_dqlite_sources) \
+  $(libraft_la_SOURCES) \
   test/raft/unit/main_core.c \
   test/raft/unit/test_byte.c \
   test/raft/unit/test_compress.c \
@@ -241,9 +235,12 @@ raft_core_unit_test_SOURCES = \
   test/raft/unit/test_err.c \
   test/raft/unit/test_flags.c \
   test/raft/unit/test_log.c \
-  test/raft/unit/test_queue.c
+  test/raft/unit/test_queue.c \
+  test/raft/unit/test_snapshot.c
+
 raft_core_unit_test_CFLAGS = $(AM_CFLAGS) -Wno-conversion
-raft_core_unit_test_LDADD = libtest.la
+raft_core_unit_test_LDFLAGS = $(AM_LDFLAGS) -no-install
+raft_core_unit_test_LDADD = libtest.la libraft.la
 
 raft_core_integration_test_SOURCES = \
   $(basic_dqlite_sources) \
@@ -325,7 +322,7 @@ if LZ4_AVAILABLE
 libdqlite_la_CFLAGS += -DLZ4_AVAILABLE $(LZ4_CFLAGS)
 libdqlite_la_LDFLAGS += $(LZ4_LIBS)
 raft_core_unit_test_CFLAGS += -DLZ4_AVAILABLE $(LZ4_CFLAGS)
-raft_core_unit_test_LDFLAGS = $(LZ4_LIBS)
+raft_core_unit_test_LDFLAGS += $(LZ4_LIBS)
 libraft_la_CFLAGS += -DLZ4_AVAILABLE $(LZ4_CFLAGS)
 libraft_la_LDFLAGS += $(LZ4_LIBS)
 raft_uv_integration_test_CFLAGS += -DLZ4_AVAILABLE

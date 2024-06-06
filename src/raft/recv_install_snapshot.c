@@ -455,7 +455,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 
 	struct snapshot_leader_state *snapshot_state =
 		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
-	struct leader_snapshot_io *io = snapshot_state->io;
+	struct snapshot_leader_io *io = snapshot_state->io;
 	assert(snapshot_state != NULL && io != NULL);
 
 	PRE(is_main_thread());
@@ -469,7 +469,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		}
 		raft_index follower_index =
 			msg->append_entries_result.last_log_index;
-		if (!io->log_index_found(r, follower_index)) {
+		if (!io->log_index_found(follower_index)) {
 			// Follower needs an entry which is not on the Raft log anymore.
 			sm_move(leader, LS_FOLLOWER_NEEDS_SNAPSHOT);
 			// TODO: send RAFT_IO_INSTALL_SNAPSHOT.
@@ -492,7 +492,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		PRE(snapshot_state->ht == NULL && snapshot_state->ht_stmt == NULL);
 
 		// TODO: sem_move. Crate a mutex to sync.
-		async_create_ht(snapshot_state, LS_SIGNATURES_CALC_STARTED);
+		// async_create_ht(snapshot_state, LS_SIGNATURES_CALC_STARTED);
 		break;
 	case LS_SIGNATURES_CALC_STARTED:
 		if (msg->type != RAFT_IO_SIGNATURE_RESULT) {
@@ -500,8 +500,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		}
 		PRE(snapshot_state->ht != NULL && snapshot_state->ht_stmt != NULL);
 
-		async_insert_checksums(snapshot_state, msg->signature_result.cs,
-				msg->signature_result.cs_nr, LS_SIGNATURES_CALC_STARTED);
+		// async_insert_checksums(snapshot_state, msg->signature_result.cs,
+				// msg->signature_result.cs_nr, LS_SIGNATURES_CALC_STARTED);
 		// TODO: other state transition.
 		// TODO: send RAFT_IO_SIGNATURE_RESULT.
 		break;
@@ -537,9 +537,11 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	return true;
 }
 
-void snapshot_leader_state_init(struct snapshot_leader_state *state, struct raft *r, raft_id follower_id) {
-	state->r = r;
+void snapshot_leader_state_init(struct snapshot_leader_state *state, 
+		struct snapshot_leader_io *io, 
+		raft_id follower_id) {
 	state->follower_id = follower_id;
+	state->io = io;
 	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
 }
 
