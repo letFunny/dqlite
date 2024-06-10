@@ -16,6 +16,7 @@
 
 #include <uv.h>
 
+#include "lib/sm.h"
 #include "lib/queue.h"
 
 #ifndef RAFT_API
@@ -328,6 +329,25 @@ struct raft_append_entries_result
 };
 #define RAFT_APPEND_ENTRIES_RESULT_VERSION 1
 
+typedef unsigned int checksum_t;
+typedef unsigned long int pageno_t;
+
+struct page_checksum_t {
+	pageno_t   page_no;
+	checksum_t checksum;
+};
+
+struct page_from_to {
+	pageno_t from;
+	pageno_t to;
+};
+
+enum raft_result {
+	OK = 0,
+	UNEXPECTED = 1,
+	DONE = 2,
+};
+
 /**
  * Hold the arguments of an InstallSnapshot RPC (figure 5.3).
  */
@@ -340,8 +360,72 @@ struct raft_install_snapshot
 	struct raft_configuration conf; /* Config as of last_index. */
 	raft_index conf_index;          /* Commit index of conf. */
 	struct raft_buffer data;        /* Raw snapshot data. */
+	enum raft_result result;
 };
 #define RAFT_INSTALL_SNAPSHOT_VERSION 0
+
+struct raft_install_snapshot_result {
+	int version;
+
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_RESULT_VERSION 0
+
+struct raft_signature {
+	int version;
+
+	const char *db;
+	struct page_from_to page_from_to;
+	unsigned int cs_page_no;
+};
+#define RAFT_SIGNATURE_VERSION 0
+
+struct raft_signature_result {
+	int version;
+
+	const char *db;
+	struct page_checksum_t *cs;
+	unsigned int cs_nr;
+	unsigned int cs_page_no;
+	enum raft_result result;
+};
+#define RAFT_SIGNATURE_RESULT_VERSION 0
+
+struct raft_install_snapshot_mv {
+	int version;
+
+	const char *db;
+	struct page_from_to *mv;
+	unsigned int mv_nr;
+};
+#define RAFT_INSTALL_SNAPSHOT_MV_VERSION 0
+
+struct raft_install_snapshot_mv_result {
+	int version;
+
+	const char *db;
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_MV_RESULT_VERSION 0
+
+struct raft_install_snapshot_cp {
+	int version;
+
+	const char *db;
+	pageno_t page_no;
+	struct raft_buffer page_data;
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_CP_VERSION 0
+
+struct raft_install_snapshot_cp_result {
+	int version;
+
+	pageno_t last_known_page_no; /* used for retries and message losses */
+	enum raft_result result;
+};
+#define RAFT_INSTALL_SNAPSHOT_CP_RESULT_VERSION 0
 
 /**
  * Hold the arguments of a TimeoutNow RPC.
@@ -367,7 +451,14 @@ enum {
 	RAFT_IO_REQUEST_VOTE,
 	RAFT_IO_REQUEST_VOTE_RESULT,
 	RAFT_IO_INSTALL_SNAPSHOT,
-	RAFT_IO_TIMEOUT_NOW
+	RAFT_IO_TIMEOUT_NOW,
+	RAFT_IO_SIGNATURE,
+	RAFT_IO_SIGNATURE_RESULT,
+	RAFT_IO_INSTALL_SNAPSHOT_RESULT,
+	RAFT_IO_INSTALL_SNAPSHOT_MV,
+	RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT,
+	RAFT_IO_INSTALL_SNAPSHOT_CP,
+	RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT,
 };
 
 /**
@@ -409,6 +500,13 @@ struct raft_message
 		struct raft_append_entries append_entries;
 		struct raft_append_entries_result append_entries_result;
 		struct raft_install_snapshot install_snapshot;
+		struct raft_install_snapshot_result install_snapshot_result;
+		struct raft_signature signature;
+		struct raft_signature_result signature_result;
+		struct raft_install_snapshot_cp install_snapshot_cp;
+		struct raft_install_snapshot_cp_result install_snapshot_cp_result;
+		struct raft_install_snapshot_mv install_snapshot_mv;
+		struct raft_install_snapshot_mv_result install_snapshot_mv_result;
 		struct raft_timeout_now timeout_now;
 	};
 };
