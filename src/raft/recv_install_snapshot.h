@@ -29,8 +29,8 @@ struct snapshot_leader_state {
 	sqlite3 *ht;
 	sqlite3_stmt *ht_stmt;
 	struct snapshot_leader_io *io;
-	unsigned long last_page;
-	unsigned long last_page_acked;
+	pageno_t last_page;
+	pageno_t last_page_acked;
 };
 
 // TODO: Page reading from db on disk. Iterate in chunks and barriers in

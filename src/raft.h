@@ -329,8 +329,8 @@ struct raft_append_entries_result
 };
 #define RAFT_APPEND_ENTRIES_RESULT_VERSION 1
 
-typedef unsigned int checksum_t;
-typedef unsigned long int pageno_t;
+typedef uint32_t checksum_t;
+typedef uint32_t pageno_t;
 
 struct page_checksum_t {
 	pageno_t   page_no;
@@ -343,9 +343,9 @@ struct page_from_to {
 };
 
 enum raft_result {
-	OK = 0,
-	UNEXPECTED = 1,
-	DONE = 2,
+	RAFT_RESULT_OK = 0,
+	RAFT_RESULT_UNEXPECTED = 1,
+	RAFT_RESULT_DONE = 2,
 };
 
 /**
@@ -376,7 +376,7 @@ struct raft_signature {
 
 	const char *db;
 	struct page_from_to page_from_to;
-	unsigned int cs_page_no;
+	pageno_t cs_page_no;
 };
 #define RAFT_SIGNATURE_VERSION 0
 
@@ -386,7 +386,7 @@ struct raft_signature_result {
 	const char *db;
 	struct page_checksum_t *cs;
 	unsigned int cs_nr;
-	unsigned int cs_page_no;
+	pageno_t cs_page_no;
 	enum raft_result result;
 };
 #define RAFT_SIGNATURE_RESULT_VERSION 0

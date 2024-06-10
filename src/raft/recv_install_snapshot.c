@@ -11,9 +11,9 @@
 #include "replication.h"
 
 #include "../lib/sm.h"
-#include "src/raft.h"
-#include "src/raft/recv_install_snapshot.h"
-#include "src/raft/uv_os.h"
+#include "../raft.h"
+#include "../raft/recv_install_snapshot.h"
+#include "../raft/uv_os.h"
 
 /**
  * =Overview
@@ -317,7 +317,7 @@ static const struct sm_conf leader_states[LS_NR] = {
 struct insert_checksum_data {
 	struct snapshot_leader_state *state;
 	struct page_checksum_t *cs;
-	unsigned int cs_nr;
+	unsigned cs_nr;
 	int next_state;
 	struct raft_message *reply; /* owned */
 	struct raft_io_send *reply_req; /* owned */
@@ -327,9 +327,9 @@ static int insert_checksums(struct raft_io_async_work *req)
 {
 	int rv;
 
-	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
+	struct insert_checksum_data *data = req->data;
 	sqlite3_stmt *stmt = data->state->ht_stmt;
-	for (unsigned int i = 0; i < data->cs_nr; i++) {
+	for (unsigned i = 0; i < data->cs_nr; i++) {
 		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].checksum);
 		// TODO Instead of asserts, if we fail we send message unexpected=true and restart our sm.
 		assert(rv == SQLITE_OK);
@@ -347,7 +347,7 @@ static int insert_checksums(struct raft_io_async_work *req)
 static void insert_checksums_send_reply_cb(struct raft_io_send *req, int status) {
 	(void)status;
 
-	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
+	struct insert_checksum_data *data = req->data;
 	sm_move(&data->state->sm, data->next_state);
 
 	raft_free(data->reply);
@@ -424,9 +424,9 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 	char *err_msg;
 	int rv;
 
-	struct create_ht_data *data = (struct create_ht_data *)req->data;
+	struct create_ht_data *data = req->data;
 	struct snapshot_leader_state *state = data->state;
-	sprintf(db_filename, "ht-%lld", state->follower_id);
+	snprintf(db_filename, 30, "ht-%lld", state->follower_id);
 	rv = UvOsUnlink(db_filename);
 	assert(rv == 0 || errno == ENOENT);
 	rv = sqlite3_open_v2(db_filename, &state->ht, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
@@ -450,7 +450,7 @@ static int create_ht_and_stmt(struct raft_io_async_work *req)
 static void create_ht_send_reply_cb(struct raft_io_send *req, int status) {
 	(void)status;
 
-	struct create_ht_data *data = (struct create_ht_data *)req->data;
+	struct create_ht_data *data = req->data;
 	sm_move(&data->state->sm, data->next_state);
 
 	raft_free(data->reply);
@@ -459,7 +459,7 @@ static void create_ht_send_reply_cb(struct raft_io_send *req, int status) {
 }
 
 static void create_ht_send_reply(struct raft_io_async_work *req, int status) {
-	struct create_ht_data *data = (struct create_ht_data *)req->data;
+	struct create_ht_data *data = req->data;
 
 	if (status != 0) {
 		raft_free(data->reply);
@@ -513,7 +513,7 @@ bool is_main_thread(void)
 void send_snapshot_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
-	struct snapshot_leader_state *state = (struct snapshot_leader_state *) req->data;
+	struct snapshot_leader_state *state = req->data;
 
 	sm_move(&state->sm, LS_FOLLOWER_NEEDS_SNAPSHOT);
 
@@ -541,7 +541,7 @@ void async_send_install_snapshot(struct snapshot_leader_state *state, const stru
 void send_snapshot_done_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
-	struct snapshot_leader_state *state = (struct snapshot_leader_state *) req->data;
+	struct snapshot_leader_state *state = req->data;
 
 	state->ht_stmt = NULL;
 	sqlite3_close(state->ht);
@@ -565,7 +565,7 @@ void async_send_install_snapshot_done(struct snapshot_leader_state *state, const
 	assert(reply != NULL);
 
 	reply->type = RAFT_IO_INSTALL_SNAPSHOT;
-	reply->install_snapshot.result = DONE;
+	reply->install_snapshot.result = RAFT_RESULT_DONE;
 
 	state->io->async_send_message(req, reply, send_snapshot_done_cb);
 }
@@ -593,7 +593,7 @@ void process_snapshot_installation_cp_or_mv(struct snapshot_leader_state *state,
 void send_mv_or_cp_cb(struct raft_io_send *req, int status) {
 	(void)status;
 
-	struct snapshot_leader_state *state = (struct snapshot_leader_state *)req->data;
+	struct snapshot_leader_state *state = req->data;
 	sm_move(&state->sm, LS_SNAPSHOT_CHUNCK_SENT);
 	raft_free(req);
 }
@@ -616,7 +616,7 @@ void async_send_mv_or_cp(struct snapshot_leader_state *state) {
 
 void calculate_local_checksums(struct raft_io_async_work *req, int status) {
 	(void)status;
-	struct insert_checksum_data *data = (struct insert_checksum_data *)req->data;
+	struct insert_checksum_data *data = req->data;
 	struct snapshot_leader_state *state = data->state;
 
 	raft_free(req->data);
@@ -650,13 +650,13 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
 	(void)leader_states;
 
-	assert(leader != NULL);
-	assert(msg != NULL);
+	PRE(leader != NULL);
+	PRE(msg != NULL);
 
 	struct snapshot_leader_state *state =
 		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
 	struct snapshot_leader_io *io = state->io;
-	assert(state != NULL && io != NULL);
+	PRE(state != NULL && io != NULL);
 
 	PRE(is_main_thread());
 	PRE(msg->server_id == state->follower_id);
@@ -693,9 +693,9 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		PRE(state->ht != NULL && state->ht_stmt != NULL);
 
 
-		if (msg->signature_result.result == DONE) {
+		if (msg->signature_result.result == RAFT_RESULT_DONE) {
 			async_insert_checksums_calculate_local(state, msg);
-		} else if (msg->signature_result.result == OK) {
+		} else if (msg->signature_result.result == RAFT_RESULT_OK) {
 			struct raft_message *reply = get_signature_message(state, msg);
 			async_insert_checksums_send_reply(state, msg, reply, LS_SIGNATURES_CALC_STARTED);
 		}
@@ -720,7 +720,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 						     int prev_state)
 {
-	bool rv;
+	bool res;
 	(void)prev_state;
 	// TODO: if we need msg pointer it is better to store it in the
 	// state thanto pass it.
@@ -731,13 +731,13 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_CHUNCK_SENT) {
-		rv = CHECK(state->ht != NULL && state->ht_stmt != NULL);
-		if (!rv) {
+		res = CHECK(state->ht != NULL && state->ht_stmt != NULL);
+		if (!res) {
 			return false;
 		}
 	} else {
-		rv = CHECK(state->ht == NULL && state->ht_stmt == NULL);
-		if (!rv) {
+		res = CHECK(state->ht == NULL && state->ht_stmt == NULL);
+		if (!res) {
 			return false;
 		}
 	}
