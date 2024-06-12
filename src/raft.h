@@ -332,11 +332,12 @@ struct raft_append_entries_result
 typedef uint32_t checksum_t;
 typedef uint32_t pageno_t;
 
-struct page_checksum_t {
+struct page_checksum {
 	pageno_t   page_no;
 	checksum_t checksum;
 };
 
+/* page range [from, to], with to included */
 struct page_from_to {
 	pageno_t from;
 	pageno_t to;
@@ -384,7 +385,7 @@ struct raft_signature_result {
 	int version;
 
 	const char *db;
-	struct page_checksum_t *cs;
+	struct page_checksum *cs;
 	unsigned int cs_nr;
 	pageno_t cs_page_no;
 	enum raft_result result;

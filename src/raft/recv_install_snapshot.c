@@ -1,5 +1,6 @@
 #include "recv_install_snapshot.h"
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "../tracing.h"
@@ -246,23 +247,369 @@ static const struct sm_conf follower_states[FS_NR] = {
 	},
 };
 
+static bool is_main_thread(void)
+{
+	// TODO: thread local storage.
+	return true;
+}
+
+static int create_ht_and_stmt(char *db_filename, sqlite3 **db, sqlite3_stmt **stmt)
+{
+	// TODO tracef with err_msg and tracef in general.
+	char *err_msg;
+	int rv;
+
+	rv = UvOsUnlink(db_filename);
+	assert(rv == 0 || errno == ENOENT);
+	rv = sqlite3_open_v2(db_filename, db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_exec(*db,
+			  "CREATE TABLE map (checksum INTEGER NOT NULL, pageno "
+			  "INTEGER NOT NULL UNIQUE);",
+			  NULL, NULL, &err_msg);
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_exec(*db, "CREATE INDEX map_idx on map(checksum);",
+			  NULL, NULL, &err_msg);
+	assert(rv == SQLITE_OK);
+	rv = sqlite3_prepare_v2(*db,
+				"INSERT OR IGNORE INTO map VALUES (?, ?);", -1,
+				stmt,
+				NULL);
+	assert(rv == SQLITE_OK);
+
+	return SQLITE_OK;
+}
+
+static int insert_checksum(sqlite3_stmt *stmt, checksum_t checksum, pageno_t page_no) {
+	int rv;
+	rv = sqlite3_bind_int(stmt, 1, (int)checksum);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_bind_int(stmt, 2, (int)page_no);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_step(stmt);
+	if (rv != SQLITE_DONE) {
+		return rv;
+	}
+	rv = sqlite3_reset(stmt);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	return SQLITE_OK;
+}
+
+struct send_install_snapshot_result_data {
+	struct snapshot_follower_state *state;
+	int next_state;
+};
+
+static void send_install_snapshot_result_cb(struct raft_io_send *req, int status) {
+	struct send_install_snapshot_result_data *data = req->data;
+
+	if (status == 0) {
+		sm_move(&data->state->sm, data->next_state);
+	}
+
+	raft_free(req->data);
+	raft_free(req);
+	return;
+}
+
+static void async_send_install_snapshot_result(struct snapshot_follower_state *state, int next_state) {
+	struct send_install_snapshot_result_data *data;
+	data = raft_malloc(sizeof *data);
+	assert(data != NULL);
+	*data = (struct send_install_snapshot_result_data) {
+		.state = state,
+		.next_state = next_state,
+	};
+
+	struct raft_io_send *reply_req;
+	reply_req = raft_malloc(sizeof *reply_req);
+	assert(reply_req != NULL);
+	*reply_req = (struct raft_io_send) {
+		.data = data,
+		.cb = send_install_snapshot_result_cb,
+	};
+
+	struct raft_message *reply;
+	reply = raft_malloc(sizeof *reply);
+	assert(reply != NULL);
+	// TODO: proper message.
+	*reply = (struct raft_message) {
+		.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
+		.server_id = state->id,
+	};
+
+	state->io->async_send_message(reply_req, reply, send_install_snapshot_result_cb);
+}
+
+static void calculate_and_insert_signatures_cb(struct raft_io_async_work *req, int status) {
+	(void)status;
+
+	struct snapshot_follower_state *state = req->data;
+
+	async_send_install_snapshot_result(state, FS_SIGNATURES_CALC_DONE);
+}
+
+static checksum_t checksum_chunk(uint8_t *chunk, uint64_t chunk_size) {
+	// TODO: Use blake2.
+	(void)chunk_size;
+	checksum_t checksum = { 0 };
+	uint8_t *checksum_bytes = (uint8_t *)&checksum;
+	checksum_bytes[0] = chunk[0];
+	return checksum;
+}
+
+static int calculate_and_insert_signatures(struct raft_io_async_work *req) {
+	int rv;
+	sqlite3_stmt *ht_insert_stmt;
+	struct snapshot_follower_state *state = req->data;
+
+	char *db_filename = "ht";
+
+	rv = create_ht_and_stmt(db_filename, &state->ht, &ht_insert_stmt);
+	assert(rv == SQLITE_OK);
+
+	rv = sqlite3_prepare_v2(state->ht,
+				"SELECT * FROM map WHERE pageno <= ? AND pageno >= ?;", -1,
+				&state->ht_select_stmt, NULL);
+	assert(rv == SQLITE_OK);
+
+	uint64_t offset = 0;
+	/* chunk_size is size in number of pages. */
+	uint64_t chunk_size = 1;
+	uint8_t *chunk = raft_malloc(chunk_size);
+	assert(chunk != NULL);
+	pageno_t page_no = 0;
+	while ((rv = state->io->read_chunk(offset, 1, chunk)) == 0) {
+		rv = insert_checksum(ht_insert_stmt, checksum_chunk(chunk, chunk_size), page_no);
+		// TODO: do not use asserts.
+		assert(rv == SQLITE_OK);
+		page_no += 1;
+		// TODO: page size properly.
+		offset = page_no * 1024;
+	}
+	state->last_page = page_no - 1;
+
+	sqlite3_finalize(ht_insert_stmt);
+	raft_free(chunk);
+	return rv == EOF ? 0 : -1;
+}
+
+static void async_calculate_signatures(struct snapshot_follower_state *state) {
+	struct raft_io_async_work *work;
+	work = raft_malloc(sizeof(*work));
+	assert(work != NULL);
+	*work = (struct raft_io_async_work) {
+		.work = calculate_and_insert_signatures,
+		.data = state,
+	};
+
+	state->io->async_work(work, calculate_and_insert_signatures_cb);
+}
+
+struct send_signature_result_data {
+	struct snapshot_follower_state *state;
+	int next_state;
+};
+
+static void send_signature_result_cb(struct raft_io_send *req, int status) {
+	if (status != 0) {
+		goto cleanup;
+	}
+	struct send_signature_result_data *data = req->data;
+	sm_move(&data->state->sm, FS_SIGNATURES_PART_SENT);
+cleanup:
+	raft_free(req->data);
+	raft_free(req);
+}
+
+static int get_checksums_ht(struct snapshot_follower_state *state,
+		pageno_t first_page, unsigned page_nr, struct page_checksum *cs) {
+	int rv;
+	rv = sqlite3_bind_int(state->ht_select_stmt, 1, (int)(first_page + page_nr));
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	rv = sqlite3_bind_int(state->ht_select_stmt, 2, (int)first_page);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	for (unsigned i = 0; i < page_nr; i++) {
+		rv = sqlite3_step(state->ht_select_stmt);
+		if (rv != SQLITE_ROW) {
+			return rv;
+		}
+		long long checksum = sqlite3_column_int64(state->ht_select_stmt, 0);
+		long long page_no = sqlite3_column_int64(state->ht_select_stmt, 1);
+		cs[i] = (struct page_checksum) {
+			.checksum = (unsigned)checksum,
+			.page_no = (unsigned)page_no,
+		};
+	}
+	rv = sqlite3_reset(state->ht_select_stmt);
+	if (rv != SQLITE_OK) {
+		return rv;
+	}
+	return SQLITE_OK;
+}
+
+static void async_send_signature_result(struct snapshot_follower_state *state,
+		const struct raft_message *msg) {
+	(void)msg;
+
+	struct raft_message *reply;
+	reply = raft_malloc(sizeof(*reply));
+	assert(reply != NULL);
+
+	struct page_from_to from_to = msg->signature.page_from_to;
+	assert(from_to.to >= from_to.from && from_to.from <= state->last_page);
+	unsigned cs_nr = MIN(from_to.to, state->last_page) - from_to.from + 1;
+	bool done = from_to.from + cs_nr >= state->last_page;
+
+	struct page_checksum *cs;
+	cs = raft_malloc(sizeof(*cs) * cs_nr);
+	assert(cs != NULL);
+	get_checksums_ht(state, from_to.from, cs_nr, cs);
+
+	reply->type = RAFT_IO_SIGNATURE_RESULT;
+	reply->server_id = state->id;
+	reply->signature_result = (struct raft_signature_result) {
+		.result = done ? RAFT_RESULT_DONE : RAFT_RESULT_OK,
+		.cs_nr = cs_nr,
+		.cs = cs,
+	};
+
+	struct send_signature_result_data *data;
+	data = raft_malloc(sizeof(*data));
+	*data = (struct send_signature_result_data) {
+		.state = state,
+	};
+
+	struct raft_io_send *reply_req;
+	reply_req = raft_malloc(sizeof(*reply_req));
+	assert(reply_req != NULL);
+	reply_req->data = data;
+
+	state->io->async_send_message(reply_req, reply, send_signature_result_cb);
+}
+
+void process_cp_or_mv_result_cb(struct raft_io_send *req, int status) {
+	if (status != 0) {
+		goto cleanup;
+	}
+	struct snapshot_follower_state *state = req->data;
+	if (state->ht != NULL) {
+		// TODO: remove the file on disk and same for leader.
+		sqlite3_finalize(state->ht_select_stmt);
+		state->ht_select_stmt = NULL;
+		sqlite3_close(state->ht);
+		state->ht = NULL;
+	}
+	sm_move(&state->sm, FS_SNAPSHOT_CHUNCK_RECEIVED);
+
+cleanup:
+	raft_free(req);
+}
+
+void async_process_cp_or_mv(struct snapshot_follower_state *state,
+		const struct raft_message *msg) {
+	(void)msg;
+	struct raft_message *reply;
+	struct raft_io_send *reply_req;
+
+	reply = raft_malloc(sizeof(*reply));
+	assert(reply != NULL);
+	reply_req = raft_malloc(sizeof(*reply_req));
+	assert(reply_req != NULL);
+	reply_req->data = state;
+
+	// TODO: construct proper message.
+	reply->type = RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT;
+	reply->server_id = state->id;
+	reply->install_snapshot_cp_result.result = RAFT_RESULT_DONE;
+	state->io->async_send_message(reply_req, reply, process_cp_or_mv_result_cb);
+}
+
 __attribute__((unused)) void follower_tick(struct sm *follower,
 					   const struct raft_message *msg)
 {
-	(void)follower;
-	(void)msg;
 	(void)follower_states;
-	// switch (sm_state(follower)) {
-	// }
+
+	PRE(follower != NULL);
+	PRE(msg != NULL);
+
+	struct snapshot_follower_state *state =
+		CONTAINER_OF(follower, struct snapshot_follower_state, sm);
+	struct snapshot_io *io = state->io;
+	PRE(state != NULL && io != NULL);
+
+	PRE(is_main_thread());
+	// TODO: leader term checks should happen outside.
+	int follower_state = sm_state(follower);
+	// TODO: change to switch with curly braces.
+	if (follower_state == FS_NORMAL) {
+		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT) {
+			return;
+		}
+		sm_move(follower, FS_SIGNATURES_CALC_STARTED);
+		async_calculate_signatures(state);
+	} else if (follower_state == FS_SIGNATURES_CALC_STARTED) {
+		/* Nothing to do, wait until checksum calculation ends. */
+	} else if (follower_state == FS_SIGNATURES_CALC_DONE ||
+			follower_state == FS_SIGNATURES_PART_SENT) {
+		if (msg->type == RAFT_IO_SIGNATURE) {
+			async_send_signature_result(state, msg);
+		} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV ||
+				msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP) {
+			async_process_cp_or_mv(state, msg);
+		}
+	} else if (follower_state == FS_SNAPSHOT_CHUNCK_RECEIVED) {
+		if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV ||
+				msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP) {
+			async_process_cp_or_mv(state, msg);
+		} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT) {
+			async_send_install_snapshot_result(state, FS_NORMAL);
+		}
+	}
 }
 
-__attribute__((unused)) static bool follower_invariant(const struct sm *m,
+__attribute__((unused)) static bool follower_invariant(const struct sm *sm,
 						       int prev_state)
 {
-	(void)m;
+	bool res;
 	(void)prev_state;
-	// pool_impl_t *pi = CONTAINER_OF(m, pool_impl_t, planner_sm);
+
+	struct snapshot_follower_state *state =
+		CONTAINER_OF(sm, struct snapshot_follower_state, sm);
+
+	if (sm_state(sm) == FS_SIGNATURES_CALC_DONE ||
+	    sm_state(sm) == FS_SIGNATURES_PART_SENT) {
+		res = CHECK(state->ht != NULL && state->ht_select_stmt != NULL);
+		if (!res) {
+			return false;
+		}
+	} else {
+		res = CHECK(state->ht == NULL && state->ht_select_stmt == NULL);
+		if (!res) {
+			return false;
+		}
+	}
+	// TODO: Add to invariants check for the amount of pages we have processed.
 	return true;
+}
+
+void snapshot_follower_state_init(struct snapshot_follower_state *state,
+		struct snapshot_io *io,
+		raft_id id) {
+	state->io = io;
+	sm_init(&state->sm, follower_invariant, NULL, follower_states, FS_NORMAL);
+
+	state->id = id;
 }
 
 enum leader_states {
@@ -308,15 +655,9 @@ static const struct sm_conf leader_states[LS_NR] = {
 	},
 };
 
-/*static bool log_index_not_found(struct raft *r, raft_index follower_index)
-{
-	return follower_index < logLastIndex(r->log) &&
-	       logGet(r->log, follower_index) == NULL;
-}*/
-
 struct insert_checksum_data {
 	struct snapshot_leader_state *state;
-	struct page_checksum_t *cs;
+	struct page_checksum *cs;
 	unsigned cs_nr;
 	int next_state;
 	struct raft_message *reply; /* owned */
@@ -330,14 +671,8 @@ static int insert_checksums(struct raft_io_async_work *req)
 	struct insert_checksum_data *data = req->data;
 	sqlite3_stmt *stmt = data->state->ht_stmt;
 	for (unsigned i = 0; i < data->cs_nr; i++) {
-		rv = sqlite3_bind_int(stmt, 1, (int)data->cs[i].checksum);
 		// TODO Instead of asserts, if we fail we send message unexpected=true and restart our sm.
-		assert(rv == SQLITE_OK);
-		rv = sqlite3_bind_int(stmt, 2, (int)data->cs[i].page_no);
-		assert(rv == SQLITE_OK);
-		rv = sqlite3_step(stmt);
-		assert(rv == SQLITE_DONE);
-		rv = sqlite3_reset(stmt);
+		rv = insert_checksum(stmt, data->cs[i].checksum, data->cs[i].page_no);
 		assert(rv == SQLITE_OK);
 	}
 
@@ -417,34 +752,15 @@ struct create_ht_data {
 	struct raft_io_send *reply_req; /* owned */
 };
 
-static int create_ht_and_stmt(struct raft_io_async_work *req)
+static int leader_create_ht_and_stmt(struct raft_io_async_work *req)
 {
 	char db_filename[30];
-	// TODO tracef with err_msg and tracef in general.
-	char *err_msg;
-	int rv;
 
 	struct create_ht_data *data = req->data;
 	struct snapshot_leader_state *state = data->state;
 	snprintf(db_filename, 30, "ht-%lld", state->follower_id);
-	rv = UvOsUnlink(db_filename);
-	assert(rv == 0 || errno == ENOENT);
-	rv = sqlite3_open_v2(db_filename, &state->ht, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, "unix");
-	assert(rv == SQLITE_OK);
-	rv = sqlite3_exec(state->ht,
-			  "CREATE TABLE map (checksum INTEGER NOT NULL, pageno "
-			  "INTEGER NOT NULL UNIQUE);",
-			  NULL, NULL, &err_msg);
-	assert(rv == SQLITE_OK);
-	rv = sqlite3_exec(state->ht, "CREATE INDEX map_idx on map(checksum);",
-			  NULL, NULL, &err_msg);
-	assert(rv == SQLITE_OK);
-	rv = sqlite3_prepare_v2(state->ht,
-				"INSERT OR IGNORE INTO map VALUES (?, ?);", -1,
-				&state->ht_stmt, NULL);
-	assert(rv == SQLITE_OK);
 
-	return SQLITE_OK;
+	return create_ht_and_stmt(db_filename, &state->ht, &state->ht_stmt);
 }
 
 static void create_ht_send_reply_cb(struct raft_io_send *req, int status) {
@@ -498,19 +814,13 @@ static void async_create_ht_and_reply(struct snapshot_leader_state *state, struc
 	work = raft_malloc(sizeof *work);
 	assert(work != NULL);
 	*work = (struct raft_io_async_work) {
-		.work = create_ht_and_stmt,
+		.work = leader_create_ht_and_stmt,
 		.data = data,
 	};
 	state->io->async_work(work, create_ht_send_reply);
 }
 
-bool is_main_thread(void)
-{
-	// TODO: thread local storage.
-	return true;
-}
-
-void send_snapshot_cb(struct raft_io_send *req, int status) {
+static void send_snapshot_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
 	struct snapshot_leader_state *state = req->data;
@@ -520,7 +830,7 @@ void send_snapshot_cb(struct raft_io_send *req, int status) {
 	raft_free(req);
 }
 
-void async_send_install_snapshot(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_send_install_snapshot(struct snapshot_leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 
 	struct raft_io_send *req;
@@ -538,11 +848,12 @@ void async_send_install_snapshot(struct snapshot_leader_state *state, const stru
 	state->io->async_send_message(req, reply, send_snapshot_cb);
 }
 
-void send_snapshot_done_cb(struct raft_io_send *req, int status) {
+static void send_snapshot_done_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
 	struct snapshot_leader_state *state = req->data;
 
+	sqlite3_finalize(state->ht_stmt);
 	state->ht_stmt = NULL;
 	sqlite3_close(state->ht);
 	state->ht = NULL;
@@ -551,7 +862,7 @@ void send_snapshot_done_cb(struct raft_io_send *req, int status) {
 	raft_free(req);
 }
 
-void async_send_install_snapshot_done(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_send_install_snapshot_done(struct snapshot_leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 
 	struct raft_io_send *req;
@@ -570,7 +881,7 @@ void async_send_install_snapshot_done(struct snapshot_leader_state *state, const
 	state->io->async_send_message(req, reply, send_snapshot_done_cb);
 }
 
-struct raft_message *get_signature_message(const struct snapshot_leader_state *state, const struct raft_message *msg) {
+static struct raft_message *get_signature_message(const struct snapshot_leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 	(void)state;
 	struct raft_message *reply;
@@ -578,11 +889,17 @@ struct raft_message *get_signature_message(const struct snapshot_leader_state *s
 	assert(reply != NULL);
 	// TODO: construct proper message with the next range of checksums required.
 	reply->type = RAFT_IO_SIGNATURE;
+	reply->signature = (struct raft_signature) {
+		.page_from_to = (struct page_from_to) {
+			.from = 0,
+			.to = 10, // TODO: batches.
+		},
+	};
 
 	return reply;
 }
 
-void process_snapshot_installation_cp_or_mv(struct snapshot_leader_state *state, const struct raft_message *msg) {
+void process_cp_or_mv_result(struct snapshot_leader_state *state, const struct raft_message *msg) {
 	if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT) {
 		state->last_page_acked = msg->install_snapshot_cp_result.last_known_page_no;
 	} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT) {
@@ -590,7 +907,7 @@ void process_snapshot_installation_cp_or_mv(struct snapshot_leader_state *state,
 	}
 }
 
-void send_mv_or_cp_cb(struct raft_io_send *req, int status) {
+static void send_mv_or_cp_cb(struct raft_io_send *req, int status) {
 	(void)status;
 
 	struct snapshot_leader_state *state = req->data;
@@ -598,7 +915,7 @@ void send_mv_or_cp_cb(struct raft_io_send *req, int status) {
 	raft_free(req);
 }
 
-void async_send_mv_or_cp(struct snapshot_leader_state *state) {
+static void async_send_mv_or_cp(struct snapshot_leader_state *state) {
 	(void)state;
 	struct raft_message *reply;
 	struct raft_io_send *reply_req;
@@ -614,7 +931,7 @@ void async_send_mv_or_cp(struct snapshot_leader_state *state) {
 	state->io->async_send_message(reply_req, reply, send_mv_or_cp_cb);
 }
 
-void calculate_local_checksums(struct raft_io_async_work *req, int status) {
+static void calculate_local_checksums(struct raft_io_async_work *req, int status) {
 	(void)status;
 	struct insert_checksum_data *data = req->data;
 	struct snapshot_leader_state *state = data->state;
@@ -626,7 +943,7 @@ void calculate_local_checksums(struct raft_io_async_work *req, int status) {
 	async_send_mv_or_cp(state);
 }
 
-void async_insert_checksums_calculate_local(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_insert_checksums_calculate_local(struct snapshot_leader_state *state, const struct raft_message *msg) {
 	struct insert_checksum_data *data;
 	data = raft_malloc(sizeof(*data));
 	assert(data != NULL);
@@ -646,7 +963,7 @@ void async_insert_checksums_calculate_local(struct snapshot_leader_state *state,
 	state->io->async_work(work, calculate_local_checksums);
 }
 
-void leader_tick(struct sm *leader, const struct raft_message *msg)
+__attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
 	(void)leader_states;
 
@@ -655,13 +972,14 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 
 	struct snapshot_leader_state *state =
 		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
-	struct snapshot_leader_io *io = state->io;
+	struct snapshot_io *io = state->io;
 	PRE(state != NULL && io != NULL);
 
 	PRE(is_main_thread());
 	PRE(msg->server_id == state->follower_id);
 	// TODO: timeouts.
 	int leader_state = sm_state(leader);
+	// TODO: change to switch with curly braces.
 	if (leader_state == LS_FOLLOWER_ONLINE) {
 		if (msg->type != RAFT_IO_APPEND_ENTRIES_RESULT) {
 			return;
@@ -692,7 +1010,6 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 		}
 		PRE(state->ht != NULL && state->ht_stmt != NULL);
 
-
 		if (msg->signature_result.result == RAFT_RESULT_DONE) {
 			async_insert_checksums_calculate_local(state, msg);
 		} else if (msg->signature_result.result == RAFT_RESULT_OK) {
@@ -706,9 +1023,8 @@ void leader_tick(struct sm *leader, const struct raft_message *msg)
 				msg->type != RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT) {
 			return;
 		}
-		process_snapshot_installation_cp_or_mv(state, msg);
+		process_cp_or_mv_result(state, msg);
 		if (state->last_page_acked >= state->last_page) {
-			sqlite3_finalize(state->ht_stmt);
 			/* No more pages to sent, we are done. */
 			async_send_install_snapshot_done(state, msg);
 			return;
@@ -746,7 +1062,7 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 }
 
 void snapshot_leader_state_init(struct snapshot_leader_state *state,
-		struct snapshot_leader_io *io,
+		struct snapshot_io *io,
 		raft_id follower_id) {
 	state->follower_id = follower_id;
 	state->io = io;
