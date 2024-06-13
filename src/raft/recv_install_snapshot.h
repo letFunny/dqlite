@@ -57,6 +57,9 @@ void snapshot_follower_state_init(struct snapshot_follower_state *state,
 		struct snapshot_io *io,
 		raft_id id);
 
+/* Get the result field from any message type in the snapshot installation procedure. */
+int get_message_result(const struct raft_message *msg);
+
 /* Process an InstallSnapshot RPC from the given server. */
 int recvInstallSnapshot(struct raft *r,
 			raft_id id,

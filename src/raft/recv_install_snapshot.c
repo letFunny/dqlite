@@ -549,6 +549,7 @@ void async_send_unexpected_reply(struct snapshot_follower_state *state,
 	reply = raft_malloc(sizeof(*reply));
 	assert(reply != NULL);
 	reply->type = raft_get_reply_message_type(msg->type);
+	reply->server_id = state->id;
 	switch (reply->type) {
 		case RAFT_IO_INSTALL_SNAPSHOT_RESULT:
 			reply->install_snapshot_result.result = RAFT_RESULT_UNEXPECTED;
@@ -579,6 +580,7 @@ __attribute__((unused)) void follower_tick(struct sm *follower,
 
 	PRE(follower != NULL);
 	PRE(msg != NULL);
+	PRE(msg->type > 0);
 
 	struct snapshot_follower_state *state =
 		CONTAINER_OF(follower, struct snapshot_follower_state, sm);
@@ -590,7 +592,9 @@ __attribute__((unused)) void follower_tick(struct sm *follower,
 	int follower_state = sm_state(follower);
 	switch (follower_state) {
 	case FS_NORMAL: {
-		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT) {
+		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT || 
+				msg->install_snapshot.result != RAFT_RESULT_OK) {
+			// TODO: add this to other state and figure out how to test it.
 			async_send_unexpected_reply(state, msg);
 			return;
 		}
@@ -648,12 +652,13 @@ __attribute__((unused)) static bool follower_invariant(const struct sm *sm,
 void snapshot_follower_state_init(struct snapshot_follower_state *state,
 		struct snapshot_io *io,
 		raft_id id) {
+	PRE(io != NULL);
+
 	state->io = io;
 	state->ht = NULL;
 	state->ht_select_stmt = NULL;
-	sm_init(&state->sm, follower_invariant, NULL, follower_states, FS_NORMAL);
-
 	state->id = id;
+	sm_init(&state->sm, follower_invariant, NULL, follower_states, FS_NORMAL);
 }
 
 enum leader_states {
@@ -888,6 +893,7 @@ static void async_send_install_snapshot(struct snapshot_leader_state *state, con
 	assert(reply != NULL);
 
 	reply->type = RAFT_IO_INSTALL_SNAPSHOT;
+	reply->install_snapshot.result = RAFT_RESULT_OK;
 
 	state->io->async_send_message(req, reply, send_snapshot_cb);
 }
@@ -1007,24 +1013,58 @@ static void async_insert_checksums_calculate_local(struct snapshot_leader_state 
 	state->io->async_work(work, calculate_local_checksums);
 }
 
+int get_message_result(const struct raft_message *msg) {
+	switch (msg->type) {
+		case RAFT_IO_INSTALL_SNAPSHOT:
+			return msg->install_snapshot.result;
+		case RAFT_IO_INSTALL_SNAPSHOT_RESULT:
+			return msg->install_snapshot_result.result;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP:
+			return msg->install_snapshot_cp.result;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT:
+			return msg->install_snapshot_cp_result.result;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV:
+			return msg->install_snapshot_mv.result;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT:
+			return msg->install_snapshot_mv_result.result;
+		case RAFT_IO_SIGNATURE:
+			return msg->signature.result;
+		case RAFT_IO_SIGNATURE_RESULT:
+			return msg->signature_result.result;
+		default:
+			/* Should be unreachable. */
+			return -1;
+	}
+}
+
 __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_message *msg)
 {
 	(void)leader_states;
 
 	PRE(leader != NULL);
 	PRE(msg != NULL);
+	PRE(msg->type > 0);
 
 	struct snapshot_leader_state *state =
 		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
 	struct snapshot_io *io = state->io;
-	PRE(state != NULL && io != NULL);
 
+	PRE(state != NULL && io != NULL);
 	PRE(is_main_thread());
 	PRE(msg->server_id == state->follower_id);
+
 	// TODO: timeouts.
-	int leader_state = sm_state(leader);
-	// TODO: if message is unexpected reset sm.
 	// TODO: distinction between thread pool and libuv.
+	int leader_state = sm_state(leader);
+	if (get_message_result(msg) == RAFT_RESULT_UNEXPECTED) {
+		sqlite3_finalize(state->ht_stmt);
+		state->ht_stmt = NULL;
+		sqlite3_close(state->ht);
+		state->ht = NULL;
+		sm_move(&state->sm, LS_FOLLOWER_ONLINE);
+		return;
+	}
+
 	switch (leader_state) {
 	case LS_FOLLOWER_ONLINE: {
 		if (msg->type != RAFT_IO_APPEND_ENTRIES_RESULT) {
@@ -1081,6 +1121,10 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 		}
 		async_send_mv_or_cp(state);
 	} break;
+	case LS_SNAPSHOT_DONE_SENT: {
+		/* We are not sending any message, only resetting the state. */
+		sm_move(&state->sm, LS_FOLLOWER_ONLINE);
+	} break;
 	}
 }
 
@@ -1115,10 +1159,14 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 void snapshot_leader_state_init(struct snapshot_leader_state *state,
 		struct snapshot_io *io,
 		raft_id follower_id) {
+	PRE(io != NULL);
+
 	state->follower_id = follower_id;
 	state->io = io;
 	state->last_page_acked = 0;
 	state->last_page = 0;
+	state->ht = NULL;
+	state->ht_stmt = NULL;
 	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
 }
 

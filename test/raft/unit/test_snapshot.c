@@ -29,7 +29,6 @@ SUITE(snapshot)
 
 bool mock_log_index_found(raft_index index) {
 	(void)index;
-	fprintf(stderr, "log_index_found\n");
 	return false;
 }
 
@@ -41,13 +40,11 @@ static void mock_send_message(struct raft_io_send *req,
 	(void)req;
 	(void)msg;
 	LAST_MESSAGE_SENT = *msg;
-	fprintf(stderr, "send_message of type %d\n", msg->type);
 	cb(req, 0);
 }
 
 static int mock_async_work(struct raft_io_async_work *req,
 		  raft_io_async_work_cb cb) {
-	fprintf(stderr, "async_work\n");
 	int status = req->work((void *)&req->data);
 	cb(req, status);
 	return status;
@@ -220,6 +217,10 @@ TEST(snapshot, happy_path, set_up, tear_down, 0, NULL) {
 	msg = clear_last_message();
 	munit_assert_int(msg.type, ==, RAFT_IO_INSTALL_SNAPSHOT_RESULT);
 
+	leader_tick(&leader_state.sm, &msg);
+	/* No message expected. */
+	clear_last_message();
+
 	/* Avoid warnings about leaking a variable from the stack. */
 	CHUNKS = NULL;
 	CHUNKS_NR = 0;
@@ -286,8 +287,16 @@ TEST(snapshot, unexpected_messages, set_up, tear_down, 0, NULL) {
 		struct raft_message follower_msg = clear_last_message();
 		munit_assert_int(raft_get_reply_message_type(leader_msg.type), ==,
 			follower_msg.type);
-		leader_tick(&leader_state.sm, &msg);
-		// TODO: assert procedure is restarted.
+		munit_assert_int(get_message_result(&follower_msg), ==,
+				RAFT_RESULT_UNEXPECTED);
+		leader_tick(&leader_state.sm, &follower_msg);
+		/* Assert procedure is restarted by sending the first
+		 * RAFT_IO_APPEND_ENTRIES_RESULT again. */
+		leader_tick(&leader_state.sm, &first_msg);
+		msg = clear_last_message();
+		munit_assert_int(msg.type, ==, RAFT_IO_INSTALL_SNAPSHOT);
+
+		// TODO: free resources (state) here.
 	}
 
 cleanup:
