@@ -535,6 +535,43 @@ void async_process_cp_or_mv(struct snapshot_follower_state *state,
 	state->io->async_send_message(reply_req, reply, process_cp_or_mv_result_cb);
 }
 
+void send_unexpected_reply_cb(struct raft_io_send *req, int status) {
+	(void)status;
+	raft_free(req);
+}
+
+void async_send_unexpected_reply(struct snapshot_follower_state *state,
+		const struct raft_message *msg) {
+	(void)state;
+	(void)msg;
+
+	struct raft_message *reply;
+	reply = raft_malloc(sizeof(*reply));
+	assert(reply != NULL);
+	reply->type = raft_get_reply_message_type(msg->type);
+	switch (reply->type) {
+		case RAFT_IO_INSTALL_SNAPSHOT_RESULT:
+			reply->install_snapshot_result.result = RAFT_RESULT_UNEXPECTED;
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT:
+			reply->install_snapshot_mv_result.result = RAFT_RESULT_UNEXPECTED;
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT:
+			reply->install_snapshot_cp_result.result = RAFT_RESULT_UNEXPECTED;
+			break;
+		case RAFT_IO_SIGNATURE_RESULT:
+			reply->signature_result.result = RAFT_RESULT_UNEXPECTED;
+			break;
+	}
+
+	struct raft_io_send *reply_req;
+	reply_req = raft_malloc(sizeof(*reply_req));
+	assert(reply_req != NULL);
+	reply_req->data = state;
+
+	state->io->async_send_message(reply_req, reply, send_unexpected_reply_cb);
+}
+
 __attribute__((unused)) void follower_tick(struct sm *follower,
 					   const struct raft_message *msg)
 {
@@ -554,6 +591,7 @@ __attribute__((unused)) void follower_tick(struct sm *follower,
 	// TODO: change to switch with curly braces.
 	if (follower_state == FS_NORMAL) {
 		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT) {
+			async_send_unexpected_reply(state, msg);
 			return;
 		}
 		sm_move(follower, FS_SIGNATURES_CALC_STARTED);
@@ -607,6 +645,8 @@ void snapshot_follower_state_init(struct snapshot_follower_state *state,
 		struct snapshot_io *io,
 		raft_id id) {
 	state->io = io;
+	state->ht = NULL;
+	state->ht_select_stmt = NULL;
 	sm_init(&state->sm, follower_invariant, NULL, follower_states, FS_NORMAL);
 
 	state->id = id;
@@ -980,6 +1020,8 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 	// TODO: timeouts.
 	int leader_state = sm_state(leader);
 	// TODO: change to switch with curly braces.
+	// TODO: if message is unexpected reset sm.
+	// TODO: distinction between thread pool and libuv.
 	if (leader_state == LS_FOLLOWER_ONLINE) {
 		if (msg->type != RAFT_IO_APPEND_ENTRIES_RESULT) {
 			return;

@@ -1,5 +1,6 @@
 #include "../raft.h"
 
+#include <limits.h>
 #include <string.h>
 
 #include "../tracing.h"
@@ -302,3 +303,23 @@ static int ioFsmVersionCheck(struct raft *r,
 
 	return 0;
 }
+
+unsigned short raft_get_reply_message_type(unsigned short msg_type) {
+	switch (msg_type) {
+		case RAFT_IO_APPEND_ENTRIES:
+			return RAFT_IO_APPEND_ENTRIES_RESULT;
+		case RAFT_IO_REQUEST_VOTE:
+			return RAFT_IO_REQUEST_VOTE_RESULT;
+		case RAFT_IO_INSTALL_SNAPSHOT:
+			return RAFT_IO_INSTALL_SNAPSHOT_RESULT;
+		case RAFT_IO_SIGNATURE:
+			return RAFT_IO_SIGNATURE_RESULT;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP:
+			return RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV:
+			return RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT;
+		default:
+			return USHRT_MAX;
+	}
+}
+

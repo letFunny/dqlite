@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include "../lib/runner.h"
@@ -219,6 +220,77 @@ TEST(snapshot, happy_path, set_up, tear_down, 0, NULL) {
 	msg = clear_last_message();
 	munit_assert_int(msg.type, ==, RAFT_IO_INSTALL_SNAPSHOT_RESULT);
 
+	/* Avoid warnings about leaking a variable from the stack. */
+	CHUNKS = NULL;
+	CHUNKS_NR = 0;
+
+	return MUNIT_OK;
+}
+
+TEST(snapshot, unexpected_messages, set_up, tear_down, 0, NULL) {
+	struct snapshot_io io = {
+		.log_index_found = mock_log_index_found,
+		.async_send_message = mock_send_message,
+		.async_work = mock_async_work,
+		.read_chunk = mock_read_chunk,
+	};
+
+	raft_id leader_id = 1;
+	raft_id follower_id = 2;
+	(void)leader_id;
+
+	uint8_t follower_mock_db[4][1024] = {{1}, {2}, {3}, {4}};
+	CHUNKS = (uint8_t *)follower_mock_db;
+	CHUNKS_NR = 4;
+
+	struct raft_message first_msg = {
+		.type = RAFT_IO_APPEND_ENTRIES_RESULT,
+		.server_id = follower_id,
+	};
+	struct raft_append_entries_result append_entries_result = {
+		.last_log_index = 0, /* Entry not contained in the log. */
+	};
+	first_msg.append_entries_result = append_entries_result;
+
+	/* For each loop we initialize leader and follower, advance some steps,
+	 * then reset the follower. When the leader sends the next message
+	 * the follower should respond with RAFT_RESULT_UNEXPECTED and both
+	 * should restart the snapshot installation procedure. */
+	for (unsigned n = 1;; n++) {
+		struct snapshot_follower_state follower_state = {};
+		snapshot_follower_state_init(&follower_state, &io, follower_id);
+		struct snapshot_leader_state leader_state = {};
+		snapshot_leader_state_init(&leader_state, &io, follower_id);
+
+		struct raft_message msg = first_msg;
+		/* In this loop we advance the state machine to some state. */
+		for (unsigned i = 0; i < n; i++) {
+			leader_tick(&leader_state.sm, &msg);
+			msg = clear_last_message();
+			if (msg.type == RAFT_IO_INSTALL_SNAPSHOT
+					&& msg.install_snapshot.result == RAFT_RESULT_DONE) {
+				/* With this many steps the procedure has finished and there
+				 * is nothing more to test. */
+				goto cleanup;
+			}
+			follower_tick(&follower_state.sm, &msg);
+			msg = clear_last_message();
+		}
+
+		/* Emulate the follower crashing and the leader attempting to
+		 * send a message. */
+		leader_tick(&leader_state.sm, &msg);
+		struct raft_message leader_msg = clear_last_message();
+		snapshot_follower_state_init(&follower_state, &io, follower_id);
+		follower_tick(&follower_state.sm, &leader_msg);
+		struct raft_message follower_msg = clear_last_message();
+		munit_assert_int(raft_get_reply_message_type(leader_msg.type), ==,
+			follower_msg.type);
+		leader_tick(&leader_state.sm, &msg);
+		// TODO: assert procedure is restarted.
+	}
+
+cleanup:
 	/* Avoid warnings about leaking a variable from the stack. */
 	CHUNKS = NULL;
 	CHUNKS_NR = 0;

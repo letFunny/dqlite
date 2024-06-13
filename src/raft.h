@@ -462,6 +462,8 @@ enum {
 	RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT,
 };
 
+unsigned short raft_get_reply_message_type(unsigned short msg_type);
+
 /**
  * A single RPC message that can be sent or received over the network.
  *
