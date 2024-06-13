@@ -588,31 +588,35 @@ __attribute__((unused)) void follower_tick(struct sm *follower,
 	PRE(is_main_thread());
 	// TODO: leader term checks should happen outside.
 	int follower_state = sm_state(follower);
-	// TODO: change to switch with curly braces.
-	if (follower_state == FS_NORMAL) {
+	switch (follower_state) {
+	case FS_NORMAL: {
 		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT) {
 			async_send_unexpected_reply(state, msg);
 			return;
 		}
 		sm_move(follower, FS_SIGNATURES_CALC_STARTED);
 		async_calculate_signatures(state);
-	} else if (follower_state == FS_SIGNATURES_CALC_STARTED) {
+	} break;
+	case FS_SIGNATURES_CALC_STARTED: {
 		/* Nothing to do, wait until checksum calculation ends. */
-	} else if (follower_state == FS_SIGNATURES_CALC_DONE ||
-			follower_state == FS_SIGNATURES_PART_SENT) {
+	} break; 
+	case FS_SIGNATURES_CALC_DONE:
+	case FS_SIGNATURES_PART_SENT: {
 		if (msg->type == RAFT_IO_SIGNATURE) {
 			async_send_signature_result(state, msg);
 		} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV ||
 				msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP) {
 			async_process_cp_or_mv(state, msg);
 		}
-	} else if (follower_state == FS_SNAPSHOT_CHUNCK_RECEIVED) {
+	} break;
+	case FS_SNAPSHOT_CHUNCK_RECEIVED: {
 		if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV ||
 				msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP) {
 			async_process_cp_or_mv(state, msg);
 		} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT) {
 			async_send_install_snapshot_result(state, FS_NORMAL);
 		}
+	} break;
 	}
 }
 
@@ -1019,10 +1023,10 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 	PRE(msg->server_id == state->follower_id);
 	// TODO: timeouts.
 	int leader_state = sm_state(leader);
-	// TODO: change to switch with curly braces.
 	// TODO: if message is unexpected reset sm.
 	// TODO: distinction between thread pool and libuv.
-	if (leader_state == LS_FOLLOWER_ONLINE) {
+	switch (leader_state) {
+	case LS_FOLLOWER_ONLINE: {
 		if (msg->type != RAFT_IO_APPEND_ENTRIES_RESULT) {
 			return;
 		}
@@ -1034,7 +1038,8 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 		} else {
 			sm_move(leader, LS_FOLLOWER_ONLINE);
 		}
-	} else if (leader_state == LS_FOLLOWER_NEEDS_SNAPSHOT) {
+	} break;
+	case LS_FOLLOWER_NEEDS_SNAPSHOT: {
 		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT_RESULT) {
 			return;
 		}
@@ -1046,7 +1051,8 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 		// TODO: sem_move. Create a mutex to sync.
 		struct raft_message *reply = get_signature_message(state, msg);
 		async_create_ht_and_reply(state, reply, LS_SIGNATURES_CALC_STARTED);
-	} else if (leader_state == LS_SIGNATURES_CALC_STARTED) {
+	} break;
+	case LS_SIGNATURES_CALC_STARTED: {
 		if (msg->type != RAFT_IO_SIGNATURE_RESULT) {
 			return;
 		}
@@ -1058,9 +1064,11 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 			struct raft_message *reply = get_signature_message(state, msg);
 			async_insert_checksums_send_reply(state, msg, reply, LS_SIGNATURES_CALC_STARTED);
 		}
-	} else if (leader_state == LS_SNAPSHOT_INSTALLATION_STARTED) {
+	} break;
+	case LS_SNAPSHOT_INSTALLATION_STARTED: {
 		/* We are not expecting any message. */
-	} else if (leader_state == LS_SNAPSHOT_CHUNCK_SENT) {
+	} break;
+	case LS_SNAPSHOT_CHUNCK_SENT: {
 		if (msg->type != RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT &&
 				msg->type != RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT) {
 			return;
@@ -1072,6 +1080,7 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 			return;
 		}
 		async_send_mv_or_cp(state);
+	} break;
 	}
 }
 
