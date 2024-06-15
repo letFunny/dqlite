@@ -8,6 +8,18 @@
 
 #include "../raft.h"
 
+struct timeout {
+
+};
+
+typedef void (*leader_sm_cb)(void);
+struct rpc {
+	struct raft_message msg;
+	struct sm sm;
+	leader_sm_cb cb;
+	/* maybe timeout */
+};
+
 struct snapshot_io {
 	bool (*log_index_found)(raft_index index);
 	int (*async_work)(struct raft_io_async_work *req,
@@ -15,14 +27,21 @@ struct snapshot_io {
 	void (*async_send_message)(struct raft_io_send *req,
 			struct raft_message *msg,
 			raft_io_send_cb cb);
+	void (*to__start)(struct timeout *timeout, unsigned ms, leader_sm_cb cb);
+	void (*to__stop)(struct timeout *timeout);
+	void (*async_timeout)(unsigned duration,
+			raft_io_send_cb cb);
+	void (*tiemout_cancel)(unsigned duration,
+			raft_io_send_cb cb);
 	int (*read_chunk)(uint64_t offset,
 			uint64_t chunk_size,
 			uint8_t *chunk);
 };
 
-struct snapshot_leader_state {
+struct snp__leader_state {
 	struct snapshot_io *io;
 	struct sm sm;
+	struct rpc rpc;
 	raft_id follower_id;
 	sqlite3 *ht;
 	sqlite3_stmt *ht_stmt;
@@ -49,7 +68,7 @@ void leader_tick(struct sm *leader, const struct raft_message *msg);
 
 void follower_tick(struct sm *follower, const struct raft_message *msg);
 
-void snapshot_leader_state_init(struct snapshot_leader_state *state,
+void snapshot_leader_state_init(struct snp__leader_state *state,
 		struct snapshot_io *io,
 		raft_id follower_id);
 

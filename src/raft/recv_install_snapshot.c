@@ -210,6 +210,39 @@
  *        message of such type is unexpected. *Result(unexpected=true) sent.
  */
 
+enum rpc_states {
+	RPC_INIT,
+	RPC_SENT,
+	RPC_REPLIED,
+	RPC_TIMEOUT,
+	RPC_ERR,
+	RPC_NR
+};
+
+static const struct sm_conf rpc_states[RPC_NR] = {
+	[RPC_INIT] = {
+		.flags = SM_INITIAL,
+		.name = "init",
+		.allowed = BITS(RPC_SENT)|BITS(RPC_ERR),
+	},
+	[RPC_SENT] = {
+		.flags = SM_INITIAL,
+		.name = "sent",
+		.allowed = BITS(RPC_REPLIED)|BITS(RPC_ERR),
+	},
+	[RPC_REPLIED] = {
+		.flags = SM_FINAL,
+		.name = "replied",
+		.allowed = 0,
+	},
+	[RPC_ERR] = {
+		.flags = SM_FINAL,
+		.name = "error",
+		.allowed = 0,
+	},
+};
+
+
 enum follower_states {
 	FS_NORMAL,
 	FS_SIGNATURES_CALC_STARTED,
@@ -705,7 +738,7 @@ static const struct sm_conf leader_states[LS_NR] = {
 };
 
 struct insert_checksum_data {
-	struct snapshot_leader_state *state;
+	struct snp__leader_state *state;
 	struct page_checksum *cs;
 	unsigned cs_nr;
 	int next_state;
@@ -760,7 +793,7 @@ static void insert_checksums_send_reply(struct raft_io_async_work *req, int stat
 			insert_checksums_send_reply_cb);
 }
 
-static void async_insert_checksums_send_reply(struct snapshot_leader_state *state,
+static void async_insert_checksums_send_reply(struct snp__leader_state *state,
 				   const struct raft_message *msg,
 				   struct raft_message *reply,
 				   int next_state)
@@ -795,7 +828,7 @@ static void async_insert_checksums_send_reply(struct snapshot_leader_state *stat
 }
 
 struct create_ht_data {
-	struct snapshot_leader_state *state;
+	struct snp__leader_state *state;
 	int next_state;
 	struct raft_message *reply; /* owned */
 	struct raft_io_send *reply_req; /* owned */
@@ -806,7 +839,7 @@ static int leader_create_ht_and_stmt(struct raft_io_async_work *req)
 	char db_filename[30];
 
 	struct create_ht_data *data = req->data;
-	struct snapshot_leader_state *state = data->state;
+	struct snp__leader_state *state = data->state;
 	snprintf(db_filename, 30, "ht-%lld", state->follower_id);
 
 	return create_ht_and_stmt(db_filename, &state->ht, &state->ht_stmt);
@@ -840,7 +873,7 @@ static void create_ht_send_reply(struct raft_io_async_work *req, int status) {
 }
 
 
-static void async_create_ht_and_reply(struct snapshot_leader_state *state, struct raft_message *reply, int next_state)
+static void async_create_ht_and_reply(struct snp__leader_state *state, struct raft_message *reply, int next_state)
 {
 	struct create_ht_data *data;
 	data = raft_malloc(sizeof *data);
@@ -872,14 +905,14 @@ static void async_create_ht_and_reply(struct snapshot_leader_state *state, struc
 static void send_snapshot_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
-	struct snapshot_leader_state *state = req->data;
+	struct snp__leader_state *state = req->data;
 
 	sm_move(&state->sm, LS_FOLLOWER_NEEDS_SNAPSHOT);
 
 	raft_free(req);
 }
 
-static void async_send_install_snapshot(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_send_install_snapshot(struct snp__leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 
 	struct raft_io_send *req;
@@ -901,7 +934,7 @@ static void async_send_install_snapshot(struct snapshot_leader_state *state, con
 static void send_snapshot_done_cb(struct raft_io_send *req, int status) {
 	(void)req;
 	(void)status;
-	struct snapshot_leader_state *state = req->data;
+	struct snp__leader_state *state = req->data;
 
 	sqlite3_finalize(state->ht_stmt);
 	state->ht_stmt = NULL;
@@ -912,7 +945,7 @@ static void send_snapshot_done_cb(struct raft_io_send *req, int status) {
 	raft_free(req);
 }
 
-static void async_send_install_snapshot_done(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_send_install_snapshot_done(struct snp__leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 
 	struct raft_io_send *req;
@@ -931,7 +964,7 @@ static void async_send_install_snapshot_done(struct snapshot_leader_state *state
 	state->io->async_send_message(req, reply, send_snapshot_done_cb);
 }
 
-static struct raft_message *get_signature_message(const struct snapshot_leader_state *state, const struct raft_message *msg) {
+static struct raft_message *get_signature_message(const struct snp__leader_state *state, const struct raft_message *msg) {
 	(void)msg;
 	(void)state;
 	struct raft_message *reply;
@@ -949,7 +982,7 @@ static struct raft_message *get_signature_message(const struct snapshot_leader_s
 	return reply;
 }
 
-void process_cp_or_mv_result(struct snapshot_leader_state *state, const struct raft_message *msg) {
+void process_cp_or_mv_result(struct snp__leader_state *state, const struct raft_message *msg) {
 	if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT) {
 		state->last_page_acked = msg->install_snapshot_cp_result.last_known_page_no;
 	} else if (msg->type == RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT) {
@@ -960,12 +993,12 @@ void process_cp_or_mv_result(struct snapshot_leader_state *state, const struct r
 static void send_mv_or_cp_cb(struct raft_io_send *req, int status) {
 	(void)status;
 
-	struct snapshot_leader_state *state = req->data;
+	struct snp__leader_state *state = req->data;
 	sm_move(&state->sm, LS_SNAPSHOT_CHUNCK_SENT);
 	raft_free(req);
 }
 
-static void async_send_mv_or_cp(struct snapshot_leader_state *state) {
+static void async_send_mv_or_cp(struct snp__leader_state *state) {
 	(void)state;
 	struct raft_message *reply;
 	struct raft_io_send *reply_req;
@@ -984,7 +1017,7 @@ static void async_send_mv_or_cp(struct snapshot_leader_state *state) {
 static void calculate_local_checksums(struct raft_io_async_work *req, int status) {
 	(void)status;
 	struct insert_checksum_data *data = req->data;
-	struct snapshot_leader_state *state = data->state;
+	struct snp__leader_state *state = data->state;
 
 	raft_free(req->data);
 	raft_free(req);
@@ -993,7 +1026,7 @@ static void calculate_local_checksums(struct raft_io_async_work *req, int status
 	async_send_mv_or_cp(state);
 }
 
-static void async_insert_checksums_calculate_local(struct snapshot_leader_state *state, const struct raft_message *msg) {
+static void async_insert_checksums_calculate_local(struct snp__leader_state *state, const struct raft_message *msg) {
 	struct insert_checksum_data *data;
 	data = raft_malloc(sizeof(*data));
 	assert(data != NULL);
@@ -1045,8 +1078,8 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 	PRE(msg != NULL);
 	PRE(msg->type > 0);
 
-	struct snapshot_leader_state *state =
-		CONTAINER_OF(leader, struct snapshot_leader_state, sm);
+	struct snp__leader_state *state =
+		CONTAINER_OF(leader, struct snp__leader_state, sm);
 	struct snapshot_io *io = state->io;
 
 	PRE(state != NULL && io != NULL);
@@ -1128,6 +1161,98 @@ __attribute__((unused)) void leader_tick(struct sm *leader, const struct raft_me
 	}
 }
 
+int rpc__tick(struct rpc *rpc, const struct raft_message *msg) {
+	(void)msg;
+	/* struct snapshot_leader_state *state =
+		CONTAINER_OF(rpc, struct snapshot_leader_state, rpc);*/
+	switch (sm_state(&rpc->sm)) {
+	case RPC_INIT:
+		return 0;
+	case RPC_SENT:
+	case RPC_REPLIED:
+		return +1;
+	case RPC_TIMEOUT:
+	case RPC_ERR:
+		return -EAGAIN;
+	}
+	return -1; /* Unreachable*/
+}
+
+enum rpc_fill_variants {
+	INSTALL_SNAPSHOT_FIRST,
+};
+
+int rpc__fill(struct rpc *rpc, enum rpc_fill_variants variant) {
+	(void)variant;
+	(void)rpc;
+	return 0;
+}
+
+bool request_needs_reaction(struct snp__leader_state *state, const struct raft_message *msg) {
+	/* TODO */
+	(void)state;
+	(void)msg;
+	return true;
+}
+
+/* TODO order the functions in the file and add the proper prefixes. */
+void snapshot_leader_state_reset(struct snp__leader_state *state);
+
+/* #define RC(arg) ({tracef("leader_tick returned %d", arg);arg;})*/
+
+__attribute__((unused)) int leader_tick_2(struct sm *leader, const struct raft_message *msg)
+{
+	(void)leader_states;
+	int rv;
+
+	PRE(leader != NULL);
+	PRE(msg != NULL);
+	// PRE(msg->type > 0);
+	/* TODO Avoid malloc/free and create the structs statically in the
+	 * leader_state or rpc. */
+
+	struct snp__leader_state *state =
+		CONTAINER_OF(leader, struct snp__leader_state, sm);
+	struct snapshot_io *io = state->io;
+
+	PRE(state != NULL && io != NULL);
+	PRE(is_main_thread());
+	// PRE(msg->server_id == state->follower_id);
+
+	if (get_message_result(msg) == RAFT_RESULT_UNEXPECTED) {
+		snapshot_leader_state_reset(state);
+		sm_move(leader, LS_FOLLOWER_ONLINE);
+	} else if (!request_needs_reaction(state, msg)) {
+		/* RC: logs the return code, tracef + return. */
+		return 0;
+		/* return RC(0); */
+	}
+
+	int leader_state = sm_state(leader);
+	switch (leader_state) {
+	case LS_FOLLOWER_NEEDS_SNAPSHOT:
+		/* We can update the state here state->whatever++. */
+		/* The important thing is the pattern for handling messages.*/
+        rv = rpc__tick(&state->rpc, msg);
+        if (rv > 0) {
+            sm_move(leader, leader_state + 1);
+            // goto again;
+        } else if (rv == -EAGAIN)
+            break;
+
+        rpc__fill(&state->rpc, INSTALL_SNAPSHOT_FIRST);
+		/* Schedule timeout in rpc__send and store timeout in rpc->timeout. */
+		/* Initialize tiemout when we initialize RPC, the soonest the better. */
+        /* rc = rpc__send(leader->rpc, to_cb, sent_cb);
+        if  (rc == CRITICAL)
+            abort();
+        else if (rc != 0)
+            goto again;
+        break; */
+	}
+	return 0;
+}
+
 __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 						     int prev_state)
 {
@@ -1136,8 +1261,8 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	// TODO: if we need msg pointer it is better to store it in the
 	// state thanto pass it.
 
-	struct snapshot_leader_state *state =
-		CONTAINER_OF(sm, struct snapshot_leader_state, sm);
+	struct snp__leader_state *state =
+		CONTAINER_OF(sm, struct snp__leader_state, sm);
 
 	if (sm_state(sm) == LS_SIGNATURES_CALC_STARTED ||
 	    sm_state(sm) == LS_SNAPSHOT_INSTALLATION_STARTED ||
@@ -1156,18 +1281,29 @@ __attribute__((unused)) static bool leader_invariant(const struct sm *sm,
 	return true;
 }
 
-void snapshot_leader_state_init(struct snapshot_leader_state *state,
+static bool rpc_invariant(const struct sm *sm, int prev_state) {
+	(void)sm;
+	(void)prev_state;
+	return true;
+}
+
+void snapshot_leader_state_reset(struct snp__leader_state *state) {
+	state->last_page_acked = 0;
+	state->last_page = 0;
+	state->ht = NULL;
+	state->ht_stmt = NULL;
+	sm_init(&state->rpc.sm, rpc_invariant, NULL, rpc_states, RPC_INIT);
+	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
+}
+
+void snapshot_leader_state_init(struct snp__leader_state *state,
 		struct snapshot_io *io,
 		raft_id follower_id) {
 	PRE(io != NULL);
 
 	state->follower_id = follower_id;
 	state->io = io;
-	state->last_page_acked = 0;
-	state->last_page = 0;
-	state->ht = NULL;
-	state->ht_stmt = NULL;
-	sm_init(&state->sm, leader_invariant, NULL, leader_states, LS_FOLLOWER_ONLINE);
+	snapshot_leader_state_reset(state);
 }
 
 static void installSnapshotSendCb(struct raft_io_send *req, int status)

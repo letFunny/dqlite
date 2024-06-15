@@ -10,7 +10,7 @@
 
 struct fixture
 {
-	struct snapshot_leader_state leader_state;
+	struct snp__leader_state leader_state;
 };
 
 static void *set_up(MUNIT_UNUSED const MunitParameter params[],
@@ -123,7 +123,7 @@ TEST(snapshot, happy_path, set_up, tear_down, 0, NULL) {
 
 	raft_id leader_id = 1;
 	(void)leader_id;
-	struct snapshot_leader_state leader_state = {};
+	struct snp__leader_state leader_state = {};
 	snapshot_leader_state_init(&leader_state, &io, follower_id);
 
 	uint8_t follower_mock_db[4][1024] = {{1}, {2}, {3}, {4}};
@@ -260,7 +260,7 @@ TEST(snapshot, unexpected_messages, set_up, tear_down, 0, NULL) {
 	for (unsigned n = 1;; n++) {
 		struct snapshot_follower_state follower_state = {};
 		snapshot_follower_state_init(&follower_state, &io, follower_id);
-		struct snapshot_leader_state leader_state = {};
+		struct snp__leader_state leader_state = {};
 		snapshot_leader_state_init(&leader_state, &io, follower_id);
 
 		struct raft_message msg = first_msg;
@@ -317,7 +317,7 @@ TEST(snapshot, leader, set_up, tear_down, 0, NULL) {
 		.async_send_message = mock_send_message,
 		.async_work = mock_async_work,
 	};
-	struct snapshot_leader_state state = {};
+	struct snp__leader_state state = {};
 	snapshot_leader_state_init(&state, &io, follower_id);
 
 	{
