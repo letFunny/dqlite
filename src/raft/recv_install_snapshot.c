@@ -14,6 +14,7 @@
 #include "../raft.h"
 #include "../raft/recv_install_snapshot.h"
 #include "../utils.h"
+#include "src/lib/threadpool.h"
 
 /**
  * =Overview
@@ -370,12 +371,6 @@ static const struct sm_conf to_sm_conf[TO_NR] = {
 #define M_TIMEOUT    ((const struct raft_message *) 2)
 #define M_WORK_DONE  ((const struct raft_message *) 1)
 
-static bool is_main_thread(void)
-{
-	// TODO: thread local storage.
-	return true;
-}
-
 static bool work_sm_invariant(const struct sm *sm, int prev_state)
 {
 	(void)sm;
@@ -411,17 +406,23 @@ static bool to_sm_invariant(const struct sm *sm, int prev_state)
 	return true;
 }
 
-static void leader_work_done(struct work *w)
+static void leader_work_done(pool_work_t *w)
 {
-	struct leader *leader = CONTAINER_OF(w, struct leader, work);
-	sm_move(&w->sm, WORK_DONE);
+	struct work *work = CONTAINER_OF(w, struct work, pool_work);
+	struct leader *leader = CONTAINER_OF(work, struct leader, work);
+
+	PRE(leader->ops->is_main_thread());
+	sm_move(&work->sm, WORK_DONE);
 	leader_tick(leader, M_WORK_DONE);
 }
 
-static void follower_work_done(struct work *w)
+static void follower_work_done(pool_work_t *w)
 {
-	struct follower *follower = CONTAINER_OF(w, struct follower, work);
-	sm_move(&w->sm, WORK_DONE);
+	struct work *work = CONTAINER_OF(w, struct work, pool_work);
+	struct follower *follower = CONTAINER_OF(work, struct follower, work);
+
+	PRE(follower->ops->is_main_thread());
+	sm_move(&work->sm, WORK_DONE);
 	follower_tick(follower, M_WORK_DONE);
 }
 
@@ -430,6 +431,11 @@ static void rpc_to_cb(uv_timer_t *handle)
 	struct timeout *to = CONTAINER_OF(handle, struct timeout, handle);
 	struct rpc *rpc = CONTAINER_OF(to, struct rpc, timeout);
 	struct leader *leader = CONTAINER_OF(rpc, struct leader, rpc);
+
+	PRE(leader->ops->is_main_thread());
+	if (sm_state(&to->sm) == TO_CANCELED) {
+		return;
+	}
 	sm_move(&to->sm, TO_EXPIRED);
 	sm_move(&rpc->sm, RPC_TIMEDOUT);
 	leader_tick(leader, M_TIMEOUT);
@@ -439,6 +445,8 @@ static void leader_to_cb(uv_timer_t *handle)
 {
 	struct timeout *to = CONTAINER_OF(handle, struct timeout, handle);
 	struct leader *leader = CONTAINER_OF(to, struct leader, timeout);
+
+	PRE(leader->ops->is_main_thread());
 	sm_move(&to->sm, TO_EXPIRED);
 	leader_tick(leader, M_TIMEOUT);
 }
@@ -466,11 +474,11 @@ static void leader_sent_cb(struct sender *s, int rc)
 	struct rpc *rpc = CONTAINER_OF(s, struct rpc, sender);
 	struct leader *leader = CONTAINER_OF(rpc, struct leader, rpc);
 
+	PRE(leader->ops->is_main_thread());
 	if (UNLIKELY(rc != 0)) {
 		sm_move(&rpc->sm, RPC_ERROR);
 		return;
 	}
-
 	leader_tick(leader, M_MSG_SENT);
 }
 
@@ -479,11 +487,11 @@ static void follower_sent_cb(struct sender *s, int rc)
 	struct rpc *rpc = CONTAINER_OF(s, struct rpc, sender);
 	struct follower *follower = CONTAINER_OF(rpc, struct follower, rpc);
 
+	PRE(follower->ops->is_main_thread());
 	if (UNLIKELY(rc != 0)) {
 		sm_move(&rpc->sm, RPC_ERROR);
 		return;
 	}
-
 	follower_tick(follower, M_MSG_SENT);
 }
 
@@ -702,7 +710,7 @@ __attribute__((unused)) void leader_tick(struct leader *leader, const struct raf
 	struct sm *sm = &leader->sm;
 	const struct leader_ops *ops = leader->ops;
 
-	PRE(is_main_thread());
+	PRE(ops->is_main_thread());
 
 	if (!is_a_trigger_leader(leader, incoming) ||
 	    is_a_duplicate(leader, incoming))
@@ -779,7 +787,7 @@ __attribute__((unused)) void follower_tick(struct follower *follower, const stru
 	    is_a_duplicate(follower, incoming))
 		return;
 
-	PRE(is_main_thread());
+	PRE(ops->is_main_thread());
 
 again:
 	switch (sm_state(&follower->sm)) {
