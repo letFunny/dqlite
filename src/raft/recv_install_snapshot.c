@@ -501,22 +501,106 @@ static void follower_sent_cb(struct sender *s, int rc)
 
 static bool is_a_trigger_leader(const struct leader *leader, const struct raft_message *incoming)
 {
-	(void)leader;
-	(void)incoming;
-	return true;
+	int state = sm_state(&leader->sm);
+
+	/* Special cases: */
+	if (incoming == M_WORK_DONE) {
+		return state == LS_HT_WAIT
+		    || state == LS_PAGE_SENT
+		    || state == LS_PERSISTED_SIG_PART
+			|| state == LS_PAGE_READ;
+	} else if (incoming == M_MSG_SENT) {
+		if (sm_state(&leader->rpc.sm) != RPC_FILLED) {
+			return false;
+		}
+		return state == LS_PAGE_READ
+		    || state == LS_SNAP_DONE
+		    || state == LS_F_NEEDS_SNAP
+		    || state == LS_REQ_SIG_LOOP
+		    || state == LS_CHECK_F_HAS_SIGS;
+	} else if (incoming == M_TIMEOUT) {
+		return state == LS_PAGE_READ
+		    || state == LS_SNAP_DONE
+		    || state == LS_F_NEEDS_SNAP
+		    || state == LS_REQ_SIG_LOOP
+		    || state == LS_CHECK_F_HAS_SIGS
+		    || state == LS_WAIT_SIGS;
+	}
+
+	/* From now on, the message pointer is a valid pointer. */
+	PRE(incoming != M_MSG_SENT && incoming != M_TIMEOUT &&
+			incoming != M_WORK_DONE);
+
+	/* Leader has not send the AppendEntries message but reacts on its
+	 * reply. */
+	if (state == LS_F_ONLINE) {
+		// TODO check if raft entry is present, else it is not a trigger.
+		return incoming->type == RAFT_IO_APPEND_ENTRIES_RESULT;
+	}
+
+	/* Leader is waiting for follower reply. */
+	if (sm_state(&leader->rpc.sm) != RPC_SENT) {
+		/* We are not expecting a reply. */
+		return false;
+	};
+	switch (state) {
+	case LS_PAGE_READ:
+		return incoming->type == RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT
+		    || incoming->type == RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT;
+	case LS_SNAP_DONE:
+	case LS_F_NEEDS_SNAP:
+		return incoming->type == RAFT_IO_INSTALL_SNAPSHOT_RESULT;
+	case LS_REQ_SIG_LOOP:
+	case LS_CHECK_F_HAS_SIGS:
+		return incoming->type == RAFT_IO_SIGNATURE_RESULT;
+	}
+	return false;
 }
 
 static bool is_a_trigger_follower(const struct follower *follower,
 		const struct raft_message *incoming)
 {
-	switch (sm_state(&follower->sm)) {
-	case FS_SIGS_CALC_LOOP:
-		return incoming != M_WORK_DONE;
-	case FS_SIG_PROCESSED:
-	case FS_CHUNCK_PROCESSED:
-		return incoming == M_WORK_DONE;
+	int state = sm_state(&follower->sm);
+
+	/* Special cases: */
+	if (incoming == M_WORK_DONE) {
+		return state == FS_SIG_PROCESSED
+		    || state == FS_CHUNCK_PROCESSED
+		    || state == FS_SIG_PROCESSED
+		    || state == FS_CHUNCK_PROCESSED
+		    || state == FS_CHUNCK_REPLIED
+		    || state == FS_HT_WAIT;
+	} else if (incoming == M_MSG_SENT) {
+		if (sm_state(&follower->rpc.sm) != RPC_FILLED) {
+			return false;
+		}
+		return state == FS_NORMAL
+		    || state == FS_SIGS_CALC_LOOP
+		    || state == FS_SIG_READ
+		    || state == FS_CHUNCK_APPLIED
+		    || state == FS_SNAP_DONE;
+	} else if (incoming == M_TIMEOUT) {
+		/* No timeouts in follower. */
+		return false;
 	}
-	return true;
+
+	/* From now on, the message pointer is a valid pointer. */
+	PRE(incoming != M_MSG_SENT && incoming != M_TIMEOUT &&
+			incoming != M_WORK_DONE);
+
+	switch (state) {
+	case FS_NORMAL:
+	case FS_SNAP_DONE:
+		return incoming->type == RAFT_IO_INSTALL_SNAPSHOT;
+	case FS_SIGS_CALC_LOOP:
+		return incoming->type == RAFT_IO_SIGNATURE;
+	case FS_SIG_RECEIVING:
+		return incoming->type == RAFT_IO_SIGNATURE;
+	case FS_CHUNCK_RECEIVING:
+		return incoming->type == RAFT_IO_INSTALL_SNAPSHOT_CP
+		    || incoming->type == RAFT_IO_INSTALL_SNAPSHOT_MV;
+	}
+	return false;
 }
 
 static bool is_a_duplicate(const void *state,
@@ -572,16 +656,83 @@ static void work_fill_follower(struct follower *follower)
 
 static void rpc_fill_leader(struct leader *leader)
 {
-	rpc_init(&leader->rpc);
-	sm_relate(&leader->sm, &leader->rpc.sm);
-	sm_move(&leader->rpc.sm, RPC_FILLED);
+	struct rpc *rpc = &leader->rpc;
+
+	rpc_init(rpc);
+	sm_relate(&leader->sm, &rpc->sm);
+
+	switch (sm_state(&leader->sm)) {
+	case LS_PAGE_READ:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_INSTALL_SNAPSHOT_CP, // TODO CP OR MV.
+		};
+		break;
+	case LS_SNAP_DONE:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_INSTALL_SNAPSHOT,
+			.install_snapshot = (struct raft_install_snapshot) {
+				.result = RAFT_RESULT_DONE,
+			},
+		};
+		break;
+	case LS_F_NEEDS_SNAP:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_INSTALL_SNAPSHOT,
+		};
+		break;
+	case LS_REQ_SIG_LOOP:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_SIGNATURE,
+		};
+		break;
+	case LS_CHECK_F_HAS_SIGS:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_SIGNATURE,
+			.signature = (struct raft_signature) {
+				.ask_calculated = true,
+			},
+		};
+		break;
+	}
+
+	sm_move(&rpc->sm, RPC_FILLED);
 }
 
 static void rpc_fill_follower(struct follower *follower)
 {
-	rpc_init(&follower->rpc);
-	sm_relate(&follower->sm, &follower->rpc.sm);
-	sm_move(&follower->rpc.sm, RPC_FILLED);
+	struct rpc *rpc = &follower->rpc;
+
+	rpc_init(rpc);
+	sm_relate(&follower->sm, &rpc->sm);
+
+	switch (sm_state(&follower->sm)) {
+	case FS_SIGS_CALC_LOOP:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_SIGNATURE_RESULT,
+			.signature_result = (struct raft_signature_result) {
+				.calculated = follower->sigs_calculated,
+			},
+		};
+		break;
+	case FS_SIG_READ:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_SIGNATURE_RESULT,
+		};
+		break;
+	case FS_CHUNCK_APPLIED:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT,
+		};
+		break;
+	case FS_NORMAL:
+	case FS_SNAP_DONE:
+		rpc->message = (struct raft_message) {
+			.type = RAFT_IO_INSTALL_SNAPSHOT_RESULT,
+		};
+		break;
+	}
+
+	sm_move(&rpc->sm, RPC_FILLED);
 }
 
 static int rpc_send(struct rpc *rpc, sender_send_op op, sender_cb_op sent_cb)
@@ -644,7 +795,7 @@ static bool is_an_unexpected_trigger(const struct leader *leader,
 
 	enum raft_result res = RAFT_RESULT_UNEXPECTED;
 	switch (msg->type) {
-	case RAFT_IO_APPEND_ENTRIES:
+	case RAFT_IO_APPEND_ENTRIES_RESULT:
 		res = RAFT_RESULT_OK;
 		break;
 	case RAFT_IO_INSTALL_SNAPSHOT:
@@ -814,7 +965,6 @@ again:
 		break;
 	case FS_SIG_PROCESSED:
 	case FS_CHUNCK_PROCESSED:
-	case FS_CHUNCK_REPLIED:
 	case FS_HT_WAIT:
 		sm_move(sm, follower_next_state(sm));
 		goto again;
@@ -829,6 +979,7 @@ again:
 	case FS_SIG_REPLIED:
 	case FS_SIGS_CALC_DONE:
 	case FS_SIGS_CALC_MSG_RECEIVED:
+	case FS_CHUNCK_REPLIED:
 	case FS_FINAL:
 		sm_move(sm, follower_next_state(sm));
 		break;

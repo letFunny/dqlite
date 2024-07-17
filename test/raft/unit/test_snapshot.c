@@ -85,10 +85,10 @@ static void ut_rpc_to_expired(struct rpc *rpc)
 	rpc->timeout.cb(&rpc->timeout.handle);
 }
 
-static const struct raft_message *append_entries(void)
+static const struct raft_message *append_entries_result(void)
 {
 	static struct raft_message append_entries = {
-		.type = RAFT_IO_APPEND_ENTRIES,
+		.type = RAFT_IO_APPEND_ENTRIES_RESULT,
 	};
 
 	return &append_entries;
@@ -170,10 +170,20 @@ static void ut_to_stop_op(struct timeout *to)
 	(void)to;
 }
 
+static bool ut_msg_consumed = false;
+static struct raft_message ut_last_msg_sent;
+
+struct raft_message ut_get_msg_sent(void) {
+	munit_assert(!ut_msg_consumed);
+	ut_msg_consumed = true;
+	return ut_last_msg_sent;
+}
+
 int ut_sender_send_op(struct sender *s,
 		struct raft_message *payload,
 		sender_cb_op cb) {
-	(void)payload;
+	ut_last_msg_sent = *payload;
+	ut_msg_consumed = false;
 	s->cb = cb;
 	return 0;
 }
@@ -203,6 +213,7 @@ TEST(snapshot_follower, basic, set_up, tear_down, 0, NULL) {
 	PRE(sm_state(&follower.sm) == FS_NORMAL);
 	ut_follower_message_received(&follower, ut_install_snapshot());
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_RESULT);
 	ut_disk_io(&follower.work);
 
 	PRE(sm_state(&follower.sm) == FS_HT_WAIT);
@@ -211,6 +222,7 @@ TEST(snapshot_follower, basic, set_up, tear_down, 0, NULL) {
 	PRE(sm_state(&follower.sm) == FS_SIGS_CALC_LOOP);
 	ut_follower_message_received(&follower, ut_sign());
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE_RESULT);
 
 	PRE(sm_state(&follower.sm) == FS_SIGS_CALC_LOOP);
 	ut_disk_io(&follower.work);
@@ -220,6 +232,7 @@ TEST(snapshot_follower, basic, set_up, tear_down, 0, NULL) {
 	PRE(sm_state(&follower.sm) == FS_SIGS_CALC_LOOP);
 	ut_follower_message_received(&follower, ut_sign());
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE_RESULT);
 
 	PRE(sm_state(&follower.sm) == FS_SIG_RECEIVING);
 	ut_follower_message_received(&follower, ut_sign());
@@ -230,6 +243,7 @@ TEST(snapshot_follower, basic, set_up, tear_down, 0, NULL) {
 
 	PRE(sm_state(&follower.sm) == FS_SIG_READ);
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE_RESULT);
 
 	PRE(sm_state(&follower.sm) == FS_CHUNCK_RECEIVING);
 	ut_follower_message_received(&follower, ut_page());
@@ -238,10 +252,12 @@ TEST(snapshot_follower, basic, set_up, tear_down, 0, NULL) {
 
 	PRE(sm_state(&follower.sm) == FS_CHUNCK_APPLIED);
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT);
 
 	PRE(sm_state(&follower.sm) == FS_SNAP_DONE);
 	ut_follower_message_received(&follower, ut_install_snapshot());
 	ut_rpc_sent(&follower.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_RESULT);
 
 	sm_fini(&follower.sm);
 	return MUNIT_OK;
@@ -270,7 +286,7 @@ TEST(snapshot_leader, basic, set_up, tear_down, 0, NULL) {
 		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
 
 	PRE(sm_state(&leader.sm) == LS_F_ONLINE);
-	ut_leader_message_received(&leader, append_entries());
+	ut_leader_message_received(&leader, append_entries_result());
 
 	PRE(sm_state(&leader.sm) == LS_HT_WAIT);
 	ut_disk_io(&leader.work);
@@ -278,17 +294,21 @@ TEST(snapshot_leader, basic, set_up, tear_down, 0, NULL) {
 
 	PRE(sm_state(&leader.sm) == LS_F_NEEDS_SNAP);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT);
 	ut_leader_message_received(&leader, ut_install_snapshot_result());
 
 	PRE(sm_state(&leader.sm) == LS_CHECK_F_HAS_SIGS);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_leader_message_received(&leader, ut_sign_result());
 	ut_to_expired(&leader);
 	leader.sigs_calculated = true;
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_leader_message_received(&leader, ut_sign_result());
 
 	PRE(sm_state(&leader.sm) == LS_REQ_SIG_LOOP);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_rpc_sent(&leader.rpc);
 	PRE(sm_state(&leader.sm) == LS_REQ_SIG_LOOP);
 	ut_leader_message_received(&leader, ut_sign_result());
@@ -298,10 +318,12 @@ TEST(snapshot_leader, basic, set_up, tear_down, 0, NULL) {
 	ut_disk_io_done(&leader.work);
 
 	PRE(sm_state(&leader.sm) == LS_PAGE_READ);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_CP);
 	ut_rpc_sent(&leader.rpc);
 	ut_leader_message_received(&leader, ut_page_result());
 
 	PRE(sm_state(&leader.sm) == LS_SNAP_DONE);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT);
 	ut_rpc_sent(&leader.rpc);
 	ut_leader_message_received(&leader, ut_install_snapshot_result());
 
@@ -332,7 +354,7 @@ TEST(snapshot_leader, timeouts, set_up, tear_down, 0, NULL) {
 		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
 
 	PRE(sm_state(&leader.sm) == LS_F_ONLINE);
-	ut_leader_message_received(&leader, append_entries());
+	ut_leader_message_received(&leader, append_entries_result());
 
 	PRE(sm_state(&leader.sm) == LS_HT_WAIT);
 	ut_disk_io(&leader.work);
@@ -340,28 +362,34 @@ TEST(snapshot_leader, timeouts, set_up, tear_down, 0, NULL) {
 
 	PRE(sm_state(&leader.sm) == LS_F_NEEDS_SNAP);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT);
 	ut_rpc_to_expired(&leader.rpc);
 
 	PRE(sm_state(&leader.sm) == LS_F_NEEDS_SNAP);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT);
 	ut_leader_message_received(&leader, ut_install_snapshot_result());
 
 	PRE(sm_state(&leader.sm) == LS_CHECK_F_HAS_SIGS);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_leader_message_received(&leader, ut_sign_result());
 	ut_to_expired(&leader);
 
 	PRE(sm_state(&leader.sm) == LS_CHECK_F_HAS_SIGS);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_rpc_to_expired(&leader.rpc);
 
 	PRE(sm_state(&leader.sm) == LS_CHECK_F_HAS_SIGS);
 	leader.sigs_calculated = true;
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	ut_leader_message_received(&leader, ut_sign_result());
 
 	PRE(sm_state(&leader.sm) == LS_REQ_SIG_LOOP);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_SIGNATURE);
 	PRE(sm_state(&leader.sm) == LS_REQ_SIG_LOOP);
 	ut_leader_message_received(&leader, ut_sign_result());
 	ut_disk_io(&leader.work);
@@ -371,14 +399,17 @@ TEST(snapshot_leader, timeouts, set_up, tear_down, 0, NULL) {
 
 	PRE(sm_state(&leader.sm) == LS_PAGE_READ);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_CP);
 	ut_rpc_to_expired(&leader.rpc);
 
 	PRE(sm_state(&leader.sm) == LS_PAGE_READ);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_CP);
 	ut_leader_message_received(&leader, ut_page_result());
 
 	PRE(sm_state(&leader.sm) == LS_SNAP_DONE);
 	ut_rpc_sent(&leader.rpc);
+	munit_assert_int(ut_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT);
 	ut_leader_message_received(&leader, ut_install_snapshot_result());
 
 	sm_fini(&leader.sm);
@@ -527,7 +558,7 @@ TEST(snapshot_leader, pool_timeouts, set_up, tear_down, 0, NULL) {
 		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
 
 	PRE(sm_state(&leader->sm) == LS_F_ONLINE);
-	ut_leader_message_received(leader, append_entries());
+	ut_leader_message_received(leader, append_entries_result());
 
 	wait_work();
 
