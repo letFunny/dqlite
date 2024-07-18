@@ -901,7 +901,7 @@ again:
 		leader_rpc_tick(&leader->rpc);
 		switch (sm_state(&leader->rpc.sm)) {
 		case RPC_SENT:
-			leader_to_start(leader, &leader->rpc.timeout, 10000, rpc_to_cb);
+			leader_to_start(leader, &leader->rpc.timeout, 100, rpc_to_cb);
 			return;
 		case RPC_REPLIED:
 			leader_to_cancel(leader, &leader->rpc.timeout);
@@ -922,7 +922,7 @@ again:
 			goto again;
 		}
 
-		leader_to_start(leader, &leader->timeout, 10000, leader_to_cb);
+		leader_to_start(leader, &leader->timeout, 100, leader_to_cb);
 		sm_move(sm, leader_next_state(sm));
 		break;
 	default:

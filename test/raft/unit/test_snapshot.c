@@ -417,10 +417,8 @@ TEST(snapshot_leader, timeouts, set_up, tear_down, 0, NULL) {
 }
 
 struct test_fixture {
-	union {
-		struct leader leader;
-		struct follower follower;
-	};
+	struct leader leader;
+	struct follower follower;
 	/* true when union contains leader, false when it contains follower */
 	bool is_leader;
 
@@ -761,5 +759,83 @@ TEST(snapshot_follower, pool, pool_set_up, pool_tear_down, 0, NULL) {
 	munit_assert_int(uv_get_msg_sent().type, ==, RAFT_IO_INSTALL_SNAPSHOT_RESULT);
 
 	sm_fini(&follower->sm);
+	return MUNIT_OK;
+}
+
+SUITE(snapshot)
+
+TEST(snapshot, both, pool_set_up, pool_tear_down, 0, NULL) {
+	struct follower_ops follower_ops = {
+		.ht_create = pool_ht_create_op,
+		.work_queue = pool_work_queue_op,
+		.sender_send = uv_sender_send_op,
+		.read_sig = pool_read_sig_op,
+		.write_chunk = pool_write_chunk_op,
+		.fill_ht = pool_fill_ht_op,
+		.is_main_thread = pool_is_main_thread_op,
+	};
+
+	struct follower *follower = &global_fixture.follower;
+
+	*follower = (struct follower) {
+		.ops = &follower_ops,
+	};
+
+	sm_init(&follower->sm, follower_sm_invariant,
+		NULL, follower_sm_conf, "follower", FS_NORMAL);
+
+	struct leader_ops leader_ops = {
+		.to_init = pool_to_init_op,
+		.to_stop = pool_to_stop_op,
+		.to_start = pool_to_start_op,
+		.ht_create = pool_ht_create_op,
+		.work_queue = pool_work_queue_op,
+		.sender_send = uv_sender_send_op,
+		.is_main_thread = pool_is_main_thread_op,
+	};
+
+	struct leader *leader = &global_fixture.leader;
+	*leader = (struct leader) {
+		.ops = &leader_ops,
+
+		.sigs_more = false,
+		.pages_more = false,
+		.sigs_calculated = false,
+	};
+
+	sm_init(&leader->sm, leader_sm_invariant,
+		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
+
+	sm_relate(&leader->sm, &follower->sm);
+
+	global_fixture.is_leader = true;
+	ut_leader_message_received(leader, append_entries_result());
+	wait_work();
+	wait_msg_sent();
+
+	struct raft_message msg;
+
+#define STEP \
+	global_fixture.is_leader = false; \
+	msg = uv_get_msg_sent(); \
+	ut_follower_message_received(follower, &msg); \
+	wait_work(); \
+	wait_work(); \
+	wait_msg_sent(); \
+\
+	global_fixture.is_leader = true; \
+	msg = uv_get_msg_sent(); \
+	ut_leader_message_received(leader, &msg); \
+	wait_work(); \
+	wait_work(); \
+	wait_msg_sent(); \
+
+	STEP;
+	follower->sigs_calculated = true;
+	leader->sigs_calculated = true;
+	for (unsigned i = 0; i < 10; i++) {
+		STEP;
+	}
+
 	return MUNIT_OK;
 }
