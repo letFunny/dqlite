@@ -661,8 +661,6 @@ static void rpc_fill_leader(struct leader *leader)
 	rpc_init(rpc);
 	sm_relate(&leader->sm, &rpc->sm);
 
-	rpc->message.server_id = 2;
-    rpc->message.server_address = "127.0.0.1:9002";
 	switch (sm_state(&leader->sm)) {
 	case LS_PAGE_READ:
 		rpc->message = (struct raft_message) {
@@ -696,6 +694,8 @@ static void rpc_fill_leader(struct leader *leader)
 		};
 		break;
 	}
+	rpc->message.server_id = 2;
+    rpc->message.server_address = "127.0.0.1:9002";
 
 	sm_move(&rpc->sm, RPC_FILLED);
 }
@@ -707,8 +707,6 @@ static void rpc_fill_follower(struct follower *follower)
 	rpc_init(rpc);
 	sm_relate(&follower->sm, &rpc->sm);
 
-	rpc->message.server_id = 1;
-    rpc->message.server_address = "127.0.0.1:9001";
 	switch (sm_state(&follower->sm)) {
 	case FS_SIGS_CALC_LOOP:
 		rpc->message = (struct raft_message) {
@@ -735,6 +733,8 @@ static void rpc_fill_follower(struct follower *follower)
 		};
 		break;
 	}
+	rpc->message.server_id = 1;
+    rpc->message.server_address = "127.0.0.1:9001";
 
 	sm_move(&rpc->sm, RPC_FILLED);
 }

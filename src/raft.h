@@ -386,8 +386,8 @@ struct raft_signature_result {
 	int version;
 
 	const char *db;
-	struct page_checksum *cs;
 	uint64_t cs_nr;
+	struct page_checksum *cs;
 	pageno_t cs_page_no;
 	bool calculated;
 	enum raft_result result;
@@ -398,8 +398,8 @@ struct raft_install_snapshot_mv {
 	int version;
 
 	const char *db;
-	struct page_from_to *mv;
 	uint64_t mv_nr;
+	struct page_from_to *mv;
 	enum raft_result result;
 };
 #define RAFT_INSTALL_SNAPSHOT_MV_VERSION 0

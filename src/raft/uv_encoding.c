@@ -95,7 +95,7 @@ static size_t size_signature(const struct raft_signature *s)
 {
 	return strlen(s->db) + /* DB name. */
 		sizeof(pageno_t) * 2 + /* Page range (from, to). */
-		sizeof(uint64_t) + /* Ask calculated. */
+		sizeof(uint8_t) + /* Ask calculated. */
 		sizeof(uint64_t); /* Result. */
 }
 
@@ -105,7 +105,7 @@ static size_t size_signature_result(const struct raft_signature_result *s)
 	return strlen(s->db) + /* DB name. */
 		cs_size + /* Checksums. */
 		sizeof(uint64_t) + /* Checksum number. */
-		sizeof(uint64_t) + /* Calculated. */
+		sizeof(uint8_t) + /* Calculated. */
 		sizeof(uint64_t); /* Result. */
 }
 
@@ -239,6 +239,96 @@ static void encodeTimeoutNow(const struct raft_timeout_now *p, void *buf)
 	bytePut64(&cursor, p->last_log_term);
 }
 
+static void encode_install_snapshot_result(const struct raft_install_snapshot_result *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+	return;
+
+	bytePut64(&cursor, m->result);
+}
+
+static void encode_signature(const struct raft_signature *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+	return;
+
+	bytePutString(cursor, m->db);
+	bytePut64(cursor, m->page_from_to.from);
+	bytePut64(cursor, m->page_from_to.to);
+	bytePut8(cursor, m->ask_calculated);
+	bytePut64(&cursor, m->result);
+}
+
+static void encode_signature_result(const struct raft_signature_result *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+	return;
+
+	bytePutString(cursor, m->db);
+	bytePut64(cursor, m->cs_nr);
+	for (unsigned i = 0; i < m->cs_nr; i++) {
+		bytePut64(cursor, m->cs[i].page_no);
+		bytePut64(cursor, m->cs[i].checksum);
+	}
+	bytePut8(cursor, m->calculated);
+	bytePut64(&cursor, m->result);
+}
+
+static void encode_install_snapshot_cp(const struct raft_install_snapshot_cp *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+}
+
+static void encode_install_snapshot_cp_result(const struct raft_install_snapshot_cp_result *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+}
+
+static void encode_install_snapshot_mv(const struct raft_install_snapshot_mv *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+}
+
+static void encode_install_snapshot_mv_result(const struct raft_install_snapshot_mv_result *m,
+		void *buf)
+{
+	void *cursor = buf;
+
+	// TODO.
+	(void)cursor;
+	(void)m;
+}
+
 int uvEncodeMessage(const struct raft_message *message,
 		    uv_buf_t **bufs,
 		    unsigned *n_bufs)
@@ -329,6 +419,29 @@ int uvEncodeMessage(const struct raft_message *message,
 		case RAFT_IO_TIMEOUT_NOW:
 			encodeTimeoutNow(&message->timeout_now, cursor);
 			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_RESULT:
+			encode_install_snapshot_result(&message->install_snapshot_result, cursor);
+			break;
+		case RAFT_IO_SIGNATURE:
+			encode_signature(&message->signature, cursor);
+			break;
+		case RAFT_IO_SIGNATURE_RESULT:
+			encode_signature_result(&message->signature_result, cursor);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP:
+			encode_install_snapshot_cp(&message->install_snapshot_cp, cursor);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT:
+			encode_install_snapshot_cp_result(&message->install_snapshot_cp_result, cursor);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV:
+			encode_install_snapshot_mv(&message->install_snapshot_mv, cursor);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT:
+			encode_install_snapshot_mv_result(&message->install_snapshot_mv_result, cursor);
+			break;
+		default:
+			return RAFT_MALFORMED;
 	};
 
 	*n_bufs = 1;
