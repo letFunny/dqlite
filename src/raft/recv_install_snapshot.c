@@ -661,6 +661,8 @@ static void rpc_fill_leader(struct leader *leader)
 	rpc_init(rpc);
 	sm_relate(&leader->sm, &rpc->sm);
 
+	rpc->message.server_id = 2;
+    rpc->message.server_address = "127.0.0.1:9002";
 	switch (sm_state(&leader->sm)) {
 	case LS_PAGE_READ:
 		rpc->message = (struct raft_message) {
@@ -705,6 +707,8 @@ static void rpc_fill_follower(struct follower *follower)
 	rpc_init(rpc);
 	sm_relate(&follower->sm, &rpc->sm);
 
+	rpc->message.server_id = 1;
+    rpc->message.server_address = "127.0.0.1:9001";
 	switch (sm_state(&follower->sm)) {
 	case FS_SIGS_CALC_LOOP:
 		rpc->message = (struct raft_message) {
@@ -913,6 +917,7 @@ again:
 		rpc_fill_leader(leader);
 		rc = rpc_send(&leader->rpc, ops->sender_send, leader_sent_cb);
 		if (rc != 0) {
+			sm_move(&leader->rpc.sm, RPC_ERROR);
 			goto again;
 		}
 		break;
@@ -960,6 +965,7 @@ again:
 		rpc_fill_follower(follower);
 		rc = rpc_send(&follower->rpc, ops->sender_send, follower_sent_cb);
 		if (rc != 0) {
+			sm_move(&follower->rpc.sm, RPC_ERROR);
 			goto again;
 		}
 		break;

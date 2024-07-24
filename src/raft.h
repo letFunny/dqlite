@@ -377,9 +377,8 @@ struct raft_signature {
 
 	const char *db;
 	struct page_from_to page_from_to;
-	pageno_t cs_page_no;
-	enum raft_result result;
 	bool ask_calculated;
+	enum raft_result result;
 };
 #define RAFT_SIGNATURE_VERSION 0
 
@@ -388,10 +387,10 @@ struct raft_signature_result {
 
 	const char *db;
 	struct page_checksum *cs;
-	unsigned int cs_nr;
+	uint64_t cs_nr;
 	pageno_t cs_page_no;
-	enum raft_result result;
 	bool calculated;
+	enum raft_result result;
 };
 #define RAFT_SIGNATURE_RESULT_VERSION 0
 
@@ -400,7 +399,7 @@ struct raft_install_snapshot_mv {
 
 	const char *db;
 	struct page_from_to *mv;
-	unsigned int mv_nr;
+	uint64_t mv_nr;
 	enum raft_result result;
 };
 #define RAFT_INSTALL_SNAPSHOT_MV_VERSION 0

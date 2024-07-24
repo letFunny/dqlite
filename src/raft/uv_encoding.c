@@ -86,6 +86,60 @@ static size_t sizeofTimeoutNow(void)
 	       sizeof(uint64_t) /* Last log term. */;
 }
 
+static size_t size_install_snapshot_result(void)
+{
+	return sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_signature(const struct raft_signature *s)
+{
+	return strlen(s->db) + /* DB name. */
+		sizeof(pageno_t) * 2 + /* Page range (from, to). */
+		sizeof(uint64_t) + /* Ask calculated. */
+		sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_signature_result(const struct raft_signature_result *s)
+{
+	size_t cs_size = (sizeof(pageno_t) + sizeof(checksum_t)) * s->cs_nr;
+	return strlen(s->db) + /* DB name. */
+		cs_size + /* Checksums. */
+		sizeof(uint64_t) + /* Checksum number. */
+		sizeof(uint64_t) + /* Calculated. */
+		sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_install_snapshot_cp(const struct raft_install_snapshot_cp *m)
+{
+	size_t page_data_size = sizeof(uint64_t) + /* Length itself*/
+		m->page_data.len;
+	return strlen(m->db) + /* DB name. */
+		sizeof(pageno_t) + /* Page number. */
+		page_data_size + /* Page_data. */
+		sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_install_snapshot_cp_result(void)
+{
+	return sizeof(pageno_t) + /* Last known page number. */
+		sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_install_snapshot_mv(const struct raft_install_snapshot_mv *m)
+{
+	size_t page_ranges_size = (sizeof(pageno_t) * 2) * m->mv_nr;
+	return strlen(m->db) + /* DB name. */
+		page_ranges_size + /* Page ranges (from, to). */
+		sizeof(uint64_t) + /* Number of page ranges. */
+		sizeof(uint64_t); /* Result. */
+}
+
+static size_t size_install_snapshot_mv_result(void)
+{
+	return sizeof(pageno_t) + /* Last known page number. */
+		sizeof(uint64_t); /* Result. */
+}
+
 size_t uvSizeofBatchHeader(size_t n, bool with_local_data)
 {
 	size_t res = 8 + /* Number of entries in the batch, little endian */
@@ -215,6 +269,27 @@ int uvEncodeMessage(const struct raft_message *message,
 			break;
 		case RAFT_IO_TIMEOUT_NOW:
 			header.len += sizeofTimeoutNow();
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_RESULT:
+			header.len += size_install_snapshot_result();
+			break;
+		case RAFT_IO_SIGNATURE:
+			header.len += size_signature(&message->signature);
+			break;
+		case RAFT_IO_SIGNATURE_RESULT:
+			header.len += size_signature_result(&message->signature_result);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP:
+			header.len += size_install_snapshot_cp(&message->install_snapshot_cp);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_CP_RESULT:
+			header.len += size_install_snapshot_cp_result();
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV:
+			header.len += size_install_snapshot_mv(&message->install_snapshot_mv);
+			break;
+		case RAFT_IO_INSTALL_SNAPSHOT_MV_RESULT:
+			header.len += size_install_snapshot_mv_result();
 			break;
 		default:
 			return RAFT_MALFORMED;

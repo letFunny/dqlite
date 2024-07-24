@@ -9,6 +9,8 @@
 #include "../../../src/raft/recv_install_snapshot.h"
 #include "../../../src/utils.h"
 #include "../../../src/lib/threadpool.h"
+#include "test/raft/lib/tcp.h"
+#include "test/raft/lib/uv.h"
 
 struct fixture {
 };
@@ -418,7 +420,9 @@ TEST(snapshot_leader, timeouts, set_up, tear_down, 0, NULL) {
 
 struct test_fixture {
 	struct leader leader;
+	struct raft_io leader_io;
 	struct follower follower;
+	struct raft_io follower_io;
 	/* true when union contains leader, false when it contains follower */
 	bool is_leader;
 
@@ -446,7 +450,7 @@ static void *pool_set_up(MUNIT_UNUSED const MunitParameter params[],
                    MUNIT_UNUSED void *user_data)
 {
 	/* Prevent hangs. */
-	alarm(2);
+	ualarm(100000, 0); /* 100ms */
 
 	pool_init(&global_fixture.pool, uv_default_loop(), 4, POOL_QOS_PRIO_FAIR);
 	global_fixture.pool.flags |= POOL_FOR_UT;
@@ -764,11 +768,107 @@ TEST(snapshot_follower, pool, pool_set_up, pool_tear_down, 0, NULL) {
 
 SUITE(snapshot)
 
-TEST(snapshot, both, pool_set_up, pool_tear_down, 0, NULL) {
+/* TODO names */
+struct peer
+{
+    struct uv_loop_s loop;
+    struct raft_uv_transport transport;
+    struct raft_io io;
+};
+
+struct rft_fixture
+{
+    FIXTURE_UV_DEPS;
+    FIXTURE_TCP;
+    FIXTURE_UV;
+	struct peer follower;
+	struct peer leader;
+};
+
+#define PEER_SETUP(peer, id, address)                                    \
+    do {                                                           \
+        struct raft_uv_transport *_transport = &peer.transport; \
+        struct raft_io *_io = &peer.io;                         \
+        int _rv;                                                   \
+        _transport->version = 1;                                   \
+        _rv = raft_uv_tcp_init(_transport, uv_default_loop());                 \
+        munit_assert_int(_rv, ==, 0);                              \
+        _rv = raft_uv_init(_io, uv_default_loop(), f->dir, _transport);        \
+        munit_assert_int(_rv, ==, 0);                              \
+        _rv = _io->init(_io, id, address);                         \
+        munit_assert_int(_rv, ==, 0);                              \
+    } while (0)
+
+static void recv_cb(struct raft_io *io, struct raft_message *msg) {
+	(void)io;
+	fprintf(stderr, "HERE\n");
+	global_fixture.last_msg_sent = *msg;
+}
+
+static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
+                   MUNIT_UNUSED void *user_data) {
+	pool_set_up(params, user_data);
+
+    struct rft_fixture *f = munit_malloc(sizeof *f);
+    SETUP_UV_DEPS;
+    SETUP_TCP;
+    PEER_SETUP(f->leader, 1, "127.0.0.1:9001");
+	global_fixture.leader_io = f->leader.io;
+    PEER_SETUP(f->follower, 2, "127.0.0.1:9002");
+	global_fixture.follower_io = f->follower.io;
+
+	global_fixture.leader_io.start(&global_fixture.leader_io, 10000, NULL, recv_cb);
+	global_fixture.follower_io.start(&global_fixture.follower_io, 10000, NULL, recv_cb);
+	return f;
+}
+
+void raft_sender_send_after_cb(struct raft_io_send *req, int status) {
+	munit_assert_int(status, ==, 0);
+
+	global_fixture.msg_valid = true;
+	struct uv_sender_send_data *data = req->data;
+	data->cb(data->s, status);
+}
+
+int raft_sender_send_op(struct sender *s,
+		struct raft_message *msg,
+		sender_cb_op cb) {
+	/* We only expect one message to be in-flight. */
+	static struct uv_sender_send_data req_data;
+	static struct raft_io_send req;
+
+	s->cb = cb;
+	req_data = (struct uv_sender_send_data) {
+		.s = s,
+		.cb = cb,
+	};
+	req = (struct raft_io_send) {
+		.data = &req_data,
+	};
+	struct raft_io *io;
+	if (global_fixture.is_leader) {
+		io = &global_fixture.leader_io;
+	} else {
+		io = &global_fixture.follower_io;
+	}
+
+	int rv = io->send(io, &req, msg, raft_sender_send_after_cb);
+	munit_assert_int(rv, ==, 0);
+	return 0;
+}
+
+struct result
+{
+    struct raft_message *message;
+    bool done;
+};
+
+/* TODO use LOOP_RUN_UNTIL */
+TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	struct follower_ops follower_ops = {
 		.ht_create = pool_ht_create_op,
 		.work_queue = pool_work_queue_op,
-		.sender_send = uv_sender_send_op,
+		.sender_send = raft_sender_send_op,
 		.read_sig = pool_read_sig_op,
 		.write_chunk = pool_write_chunk_op,
 		.fill_ht = pool_fill_ht_op,
