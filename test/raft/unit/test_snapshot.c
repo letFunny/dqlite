@@ -831,9 +831,9 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 	/* Prevent hangs. */
 	alarm(2);
 
-    struct rft_fixture *f = munit_malloc(sizeof *f);
-    SETUP_UV_DEPS;
-    SETUP_UV;
+	struct rft_fixture *f = munit_malloc(sizeof *f);
+	SETUP_UV_DEPS;
+	SETUP_UV;
 
 	global_fixture.msg_sent = false;
 	global_fixture.msg_received = false;

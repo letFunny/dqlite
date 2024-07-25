@@ -1,5 +1,7 @@
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
+#include "src/lib/threadpool.h"
+#include "src/raft/recv_install_snapshot.h"
 
 /******************************************************************************
  *
@@ -857,4 +859,123 @@ TEST(snapshot, newTermWhileInstalling, setUp, tearDown, 0, NULL)
     CLUSTER_ELECT(1);
     CLUSTER_STEP_UNTIL_ELAPSED(1000);
     return MUNIT_OK;
+}
+
+SUITE(new_snapshot)
+
+static pool_t pool;
+
+static void pool_to_start_op(struct timeout *to, unsigned delay, to_cb_op cb)
+{
+	uv_timer_start(&to->handle, cb, delay, 0);
+	to->cb = cb;
+}
+
+static void pool_to_stop_op(struct timeout *to)
+{
+	uv_timer_stop(&to->handle);
+}
+
+static void pool_to_init_op(struct timeout *to)
+{
+	uv_timer_init(uv_default_loop(), &to->handle);
+}
+
+static void pool_work_queue_op(struct work *w, work_op work_cb, work_op after_cb)
+{
+	w->pool_work = (pool_work_t) { 0 };
+	pool_queue_work(&pool, &w->pool_work, 0, WT_UNORD, work_cb, after_cb);
+}
+
+static void pool_to_expired(struct leader *leader)
+{
+	uv_timer_start(&leader->timeout.handle, leader->timeout.cb, 0, 0);
+}
+
+static void pool_rpc_to_expired(struct rpc *rpc)
+{
+	uv_timer_start(&rpc->timeout.handle, rpc->timeout.cb, 0, 0);
+}
+
+static bool pool_is_main_thread_op(void) {
+	return true;
+}
+
+static void pool_ht_create_op(pool_work_t *w)
+{
+	(void)w;
+}
+
+static void pool_fill_ht_op(pool_work_t *w)
+{
+	(void)w;
+}
+
+static void pool_write_chunk_op(pool_work_t *w)
+{
+	struct work *work = CONTAINER_OF(w, struct work, pool_work);
+	struct follower *follower = CONTAINER_OF(work, struct follower, work);
+	PRE(!follower->ops->is_main_thread());
+}
+
+static void pool_read_sig_op(pool_work_t *w)
+{
+	struct work *work = CONTAINER_OF(w, struct work, pool_work);
+	struct follower *follower = CONTAINER_OF(work, struct follower, work);
+	PRE(!follower->ops->is_main_thread());
+}
+
+TEST(new_snapshot, both, setUp, tearDown, 0, NULL) {
+	/* Prevent hangs. */
+	alarm(2);
+
+    struct fixture *f = data;
+
+	pool_init(&pool, uv_default_loop(), 4, POOL_QOS_PRIO_FAIR);
+	pool.flags |= POOL_FOR_UT;
+
+	struct follower_ops follower_ops = {
+		.ht_create = pool_ht_create_op,
+		.work_queue = pool_work_queue_op,
+		.sender_send = uv_sender_send_op,
+		.read_sig = pool_read_sig_op,
+		.write_chunk = pool_write_chunk_op,
+		.fill_ht = pool_fill_ht_op,
+		.is_main_thread = pool_is_main_thread_op,
+	};
+
+	struct follower follower = {
+		.ops = &follower_ops,
+	};
+
+	sm_init(&follower.sm, follower_sm_invariant,
+		NULL, follower_sm_conf, "follower", FS_NORMAL);
+
+	struct leader_ops leader_ops = {
+		.to_init = pool_to_init_op,
+		.to_stop = pool_to_stop_op,
+		.to_start = pool_to_start_op,
+		.ht_create = pool_ht_create_op,
+		.work_queue = pool_work_queue_op,
+		.sender_send = uv_sender_send_op,
+		.is_main_thread = pool_is_main_thread_op,
+	};
+
+	struct leader leader = {
+		.ops = &leader_ops,
+
+		.sigs_more = false,
+		.pages_more = false,
+		.sigs_calculated = false,
+	};
+
+	sm_init(&leader.sm, leader_sm_invariant,
+		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
+
+	sm_relate(&leader.sm, &follower.sm); // TODO create third one.
+
+	follower.sigs_calculated = true;
+	leader.sigs_calculated = true;
+
+	return MUNIT_OK;
 }
