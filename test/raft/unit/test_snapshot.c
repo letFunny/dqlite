@@ -428,9 +428,11 @@ struct test_fixture {
 
 	/* We only expect one message to be in-flight. */
 	struct raft_message last_msg_sent;
-	bool msg_valid;
+	bool msg_sent;
+	bool msg_received;
 
 	pool_t pool;
+	uv_loop_t *loop;
 
 	/* TODO: should accomodate several background jobs in the future. Probably
 	 * by scheduling a barrier in the pool after all the works that toggles this
@@ -452,7 +454,8 @@ static void *pool_set_up(MUNIT_UNUSED const MunitParameter params[],
 	/* Prevent hangs. */
 	alarm(2);
 
-	pool_init(&global_fixture.pool, uv_default_loop(), 4, POOL_QOS_PRIO_FAIR);
+	global_fixture.loop = uv_default_loop();
+	pool_init(&global_fixture.pool, global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
 	global_fixture.pool.flags |= POOL_FOR_UT;
 	thread_identifier = MAGIC_MAIN_THREAD;
 
@@ -467,20 +470,32 @@ static void pool_tear_down(void *data)
 
 static void progress(void) {
 	for (unsigned i = 0; i < 20; i++) {
-		uv_run(uv_default_loop(), UV_RUN_NOWAIT);
+		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
 	}
 }
 
 static void wait_work(void) {
+	fprintf(stderr, "WAIT_WORK start\n");
 	while (!global_fixture.work_done) {
-		uv_run(uv_default_loop(), UV_RUN_NOWAIT);
+		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
 	}
+	fprintf(stderr, "WAIT_WORK end\n");
 }
 
 static void wait_msg_sent(void) {
-	while (!global_fixture.msg_valid) {
-		uv_run(uv_default_loop(), UV_RUN_NOWAIT);
+	fprintf(stderr, "WAIT_MSG start\n");
+	while (!global_fixture.msg_sent) {
+		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
 	}
+	fprintf(stderr, "WAIT_MSG end\n");
+}
+
+static void wait_msg_received(void) {
+	fprintf(stderr, "WAIT_MSG recv start\n");
+	while (!global_fixture.msg_received) {
+		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
+	}
+	fprintf(stderr, "WAIT_MSG recv end\n");
 }
 
 /* Decorates the callback used when the pool work is done to set the test
@@ -492,18 +507,22 @@ static void test_fixture_work_cb(pool_work_t *w) {
 
 static void pool_to_start_op(struct timeout *to, unsigned delay, to_cb_op cb)
 {
+	fprintf(stderr, "TIMER START\n");
 	uv_timer_start(&to->handle, cb, delay, 0);
 	to->cb = cb;
 }
 
 static void pool_to_stop_op(struct timeout *to)
 {
+	fprintf(stderr, "TIMER STOP\n");
 	uv_timer_stop(&to->handle);
+	// TODO uv_close((uv_handle_t*)&to->handle, NULL);
 }
 
 static void pool_to_init_op(struct timeout *to)
 {
-	uv_timer_init(uv_default_loop(), &to->handle);
+	fprintf(stderr, "TIMER INIT\n");
+	uv_timer_init(global_fixture.loop, &to->handle);
 }
 
 static void pool_work_queue_op(struct work *w, work_op work_cb, work_op after_cb)
@@ -576,7 +595,7 @@ void uv_sender_send_cb(uv_work_t *req) {
 void uv_sender_send_after_cb(uv_work_t *req, int status) {
 	(void)req;
 	(void)status;
-	global_fixture.msg_valid = true;
+	global_fixture.msg_sent = true;
 	struct uv_sender_send_data *data = req->data;
 	data->cb(data->s, 0);
 }
@@ -591,7 +610,7 @@ int uv_sender_send_op(struct sender *s,
 	global_fixture.last_msg_sent = *payload;
 	/* Flag is only toggled when the after_cb is called, emulating the message
 	 * being sent. */
-	global_fixture.msg_valid = false;
+	global_fixture.msg_sent = false;
 	s->cb = cb;
 	req_data = (struct uv_sender_send_data) {
 		.s = s,
@@ -600,13 +619,14 @@ int uv_sender_send_op(struct sender *s,
 	req = (uv_work_t) {
 		.data = &req_data,
 	};
-	uv_queue_work(uv_default_loop(), &req, uv_sender_send_cb, uv_sender_send_after_cb);
+	uv_queue_work(global_fixture.loop, &req, uv_sender_send_cb, uv_sender_send_after_cb);
 	return 0;
 }
 
 struct raft_message uv_get_msg_sent(void) {
-	munit_assert(global_fixture.msg_valid);
-	global_fixture.msg_valid = false;
+	munit_assert(global_fixture.msg_sent);
+	global_fixture.msg_sent = false;
+	global_fixture.msg_received = false;
 	return global_fixture.last_msg_sent;
 }
 
@@ -771,7 +791,7 @@ SUITE(snapshot)
 /* TODO names */
 struct peer
 {
-    uv_loop_t loop;
+    struct uv_loop_s *loop;
     struct raft_uv_transport transport;
     struct raft_io io;
 };
@@ -779,7 +799,6 @@ struct peer
 struct rft_fixture
 {
     FIXTURE_UV_DEPS;
-    FIXTURE_TCP;
     FIXTURE_UV;
 	struct peer follower;
 	struct peer leader;
@@ -791,9 +810,9 @@ struct rft_fixture
         struct raft_io *_io = &peer.io;                         \
         int _rv;                                                   \
         _transport->version = 1;                                   \
-        _rv = raft_uv_tcp_init(_transport, &peer.loop);                 \
+        _rv = raft_uv_tcp_init(_transport, peer.loop);                 \
         munit_assert_int(_rv, ==, 0);                              \
-        _rv = raft_uv_init(_io, &peer.loop, f->dir, _transport);        \
+        _rv = raft_uv_init(_io, peer.loop, f->dir, _transport);        \
         munit_assert_int(_rv, ==, 0);                              \
         _rv = _io->init(_io, id, address);                         \
         munit_assert_int(_rv, ==, 0);                              \
@@ -801,33 +820,49 @@ struct rft_fixture
 
 static void recv_cb(struct raft_io *io, struct raft_message *msg) {
 	(void)io;
-	global_fixture.msg_valid = true;
+	fprintf(stderr, "RECV, msg.type:%d, msg.server_address:%s, is_leader:%d\n", msg->type, msg->server_address, global_fixture.is_leader);
 	global_fixture.last_msg_sent = *msg;
+	global_fixture.msg_received = true;
 }
 
 static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
                    MUNIT_UNUSED void *user_data) {
-	pool_set_up(params, user_data);
+	int rv;
+	/* Prevent hangs. */
+	alarm(2);
 
     struct rft_fixture *f = munit_malloc(sizeof *f);
     SETUP_UV_DEPS;
-    SETUP_TCP;
     SETUP_UV;
-	f->leader.loop = (struct uv_loop_s *)uv_default_loop();
+
+	global_fixture.msg_sent = false;
+	global_fixture.msg_received = false;
+	global_fixture.loop = &f->loop;
+
+	f->leader.loop = &f->loop;
     PEER_SETUP(f->leader, 1, "127.0.0.1:9001");
 	global_fixture.leader_io = f->leader.io;
-	f->follower.loop = f->loop;
+
+	f->follower.loop = &f->loop;
     PEER_SETUP(f->follower, 2, "127.0.0.1:9002");
 	global_fixture.follower_io = f->follower.io;
 
-	global_fixture.leader_io.start(&global_fixture.leader_io, 10000, NULL, recv_cb);
-	global_fixture.follower_io.start(&global_fixture.follower_io, 10000, NULL, recv_cb);
+	pool_init(&global_fixture.pool, global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
+	global_fixture.pool.flags |= POOL_FOR_UT;
+	thread_identifier = MAGIC_MAIN_THREAD;
+
+	rv = global_fixture.leader_io.start(&global_fixture.leader_io, 1000, NULL, recv_cb);
+	munit_assert_int(rv, ==, 0);
+	rv = global_fixture.follower_io.start(&global_fixture.follower_io, 1000, NULL, recv_cb);
+	munit_assert_int(rv, ==, 0);
 	return f;
 }
 
 void raft_sender_send_after_cb(struct raft_io_send *req, int status) {
 	munit_assert_int(status, ==, 0);
 
+	fprintf(stderr, "AFTER SENT, is_leader:%d\n", global_fixture.is_leader);
+	global_fixture.msg_sent = true;
 	struct uv_sender_send_data *data = req->data;
 	data->cb(data->s, status);
 }
@@ -839,6 +874,8 @@ int raft_sender_send_op(struct sender *s,
 	static struct uv_sender_send_data req_data;
 	static struct raft_io_send req;
 
+	global_fixture.msg_sent = false;
+	global_fixture.msg_received = false;
 	s->cb = cb;
 	req_data = (struct uv_sender_send_data) {
 		.s = s,
@@ -856,7 +893,7 @@ int raft_sender_send_op(struct sender *s,
 
 	int rv = io->send(io, &req, msg, raft_sender_send_after_cb);
 	munit_assert_int(rv, ==, 0);
-	fprintf(stderr, "SENT\n");
+	fprintf(stderr, "SENT, msg.type:%d, msg.address:%s, is_leader:%d\n", msg->type, msg->server_address, global_fixture.is_leader);
 	return 0;
 }
 
@@ -893,7 +930,7 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 		.to_start = pool_to_start_op,
 		.ht_create = pool_ht_create_op,
 		.work_queue = pool_work_queue_op,
-		.sender_send = uv_sender_send_op,
+		.sender_send = raft_sender_send_op,
 		.is_main_thread = pool_is_main_thread_op,
 	};
 
@@ -909,7 +946,7 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	sm_init(&leader->sm, leader_sm_invariant,
 		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
 
-	sm_relate(&leader->sm, &follower->sm);
+	// TODO sm_relate(&leader->sm, &follower->sm);
 
 	global_fixture.is_leader = true;
 	ut_leader_message_received(leader, append_entries_result());
@@ -918,29 +955,51 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 
 	struct raft_message msg;
 
+	global_fixture.is_leader = false;
+	wait_msg_received();
+	msg = uv_get_msg_sent();
+	/* Address of the receving end, not the sender. */
+	munit_assert_int(msg.server_id, ==, 1);
+	munit_assert_string_equal(msg.server_address, "127.0.0.1:9001");
+	ut_follower_message_received(follower, &msg);
+	wait_work();
+	wait_work();
+	fprintf(stderr, "BEFORE ERR\n");
+	wait_msg_sent();
+
+	global_fixture.is_leader = true;
+	wait_msg_received();
+	msg = uv_get_msg_sent();
+	munit_assert_int(msg.server_id, ==, 2);
+	munit_assert_string_equal(msg.server_address, "127.0.0.1:9002");
+	ut_leader_message_received(leader, &msg);
+	wait_work();
+	wait_work();
+	wait_msg_sent();
+
+	// TODO pass messages to one or the other depending on address? It will be
+	// more dynamic.
 #define STEP \
 	global_fixture.is_leader = false; \
+	wait_msg_received(); \
 	msg = uv_get_msg_sent(); \
+	munit_assert_int(msg.server_id, ==, 1); \
 	ut_follower_message_received(follower, &msg); \
 	wait_work(); \
 	wait_work(); \
 	wait_msg_sent(); \
 \
 	global_fixture.is_leader = true; \
+	wait_msg_received(); \
 	msg = uv_get_msg_sent(); \
+	munit_assert_int(msg.server_id, ==, 2); \
 	ut_leader_message_received(leader, &msg); \
 	wait_work(); \
 	wait_work(); \
 	wait_msg_sent(); \
 
-	struct rft_fixture *f = data;
-	uv_print_all_handles(uv_default_loop(), stderr);
-	fprintf(stderr, "------\n");
-	uv_print_all_handles((uv_loop_t*)&f->leader.loop, stderr);
-	fprintf(stderr, "------\n");
-	uv_print_all_handles((uv_loop_t*)&f->follower.loop, stderr);
-	fprintf(stderr, "------\n");
-	// TODO I think the problem is that I have more than one loop.
+	// uv_print_active_handles(global_fixture.loop, stderr);
+	// fprintf(stderr, "------\n");
 
 	STEP;
 	follower->sigs_calculated = true;

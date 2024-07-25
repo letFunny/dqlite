@@ -623,9 +623,15 @@ static void rpc_init(struct rpc *rpc)
 
 static void rpc_fini(struct rpc *rpc)
 {
+	// TODO remove timer.
 	sm_move(&rpc->sm, RPC_END);
 }
 
+static void rpc_err(struct rpc *rpc)
+{
+	// TODO remove timer.
+	sm_move(&rpc->sm, RPC_ERROR);
+}
 
 static void work_fill_leader(struct leader *leader)
 {
@@ -695,7 +701,7 @@ static void rpc_fill_leader(struct leader *leader)
 		break;
 	}
 	rpc->message.server_id = 2;
-    rpc->message.server_address = "127.0.0.1:9002";
+	rpc->message.server_address = "127.0.0.1:9002";
 
 	sm_move(&rpc->sm, RPC_FILLED);
 }
@@ -734,7 +740,7 @@ static void rpc_fill_follower(struct follower *follower)
 		break;
 	}
 	rpc->message.server_id = 1;
-    rpc->message.server_address = "127.0.0.1:9001";
+	rpc->message.server_address = "127.0.0.1:9001";
 
 	sm_move(&rpc->sm, RPC_FILLED);
 }
@@ -917,7 +923,8 @@ again:
 		rpc_fill_leader(leader);
 		rc = rpc_send(&leader->rpc, ops->sender_send, leader_sent_cb);
 		if (rc != 0) {
-			sm_move(&leader->rpc.sm, RPC_ERROR);
+			rpc_err(&leader->rpc);
+			break; // TODO remove.
 			goto again;
 		}
 		break;
