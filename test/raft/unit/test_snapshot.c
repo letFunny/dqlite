@@ -797,8 +797,7 @@ struct peer
 
 struct rft_fixture
 {
-    FIXTURE_UV_DEPS;
-    FIXTURE_UV;
+    FIXTURE_DIR;
 	struct peer follower;
 	struct peer leader;
 };
@@ -831,15 +830,11 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 	alarm(2);
 
 	struct rft_fixture *f = munit_malloc(sizeof *f);
-    // SET_UP_DIR;
-    // SET_UP_HEAP;
-	SETUP_UV_DEPS;
-	// SETUP_UV;
+    SET_UP_DIR;
 	global_fixture.loop = uv_default_loop();
 
 	global_fixture.msg_sent = false;
 	global_fixture.msg_received = false;
-	global_fixture.loop = &f->loop;
 
     PEER_SETUP(f->leader, 1, "127.0.0.1:9001");
 	global_fixture.leader_io = f->leader.io;
