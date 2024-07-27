@@ -791,7 +791,6 @@ SUITE(snapshot)
 /* TODO names */
 struct peer
 {
-    struct uv_loop_s *loop;
     struct raft_uv_transport transport;
     struct raft_io io;
 };
@@ -810,9 +809,9 @@ struct rft_fixture
         struct raft_io *_io = &peer.io;                         \
         int _rv;                                                   \
         _transport->version = 1;                                   \
-        _rv = raft_uv_tcp_init(_transport, peer.loop);                 \
+        _rv = raft_uv_tcp_init(_transport, global_fixture.loop);                 \
         munit_assert_int(_rv, ==, 0);                              \
-        _rv = raft_uv_init(_io, peer.loop, f->dir, _transport);        \
+        _rv = raft_uv_init(_io, global_fixture.loop, f->dir, _transport);        \
         munit_assert_int(_rv, ==, 0);                              \
         _rv = _io->init(_io, id, address);                         \
         munit_assert_int(_rv, ==, 0);                              \
@@ -832,20 +831,23 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 	alarm(2);
 
 	struct rft_fixture *f = munit_malloc(sizeof *f);
+    // SET_UP_DIR;
+    // SET_UP_HEAP;
 	SETUP_UV_DEPS;
-	SETUP_UV;
+	// SETUP_UV;
+	global_fixture.loop = uv_default_loop();
 
 	global_fixture.msg_sent = false;
 	global_fixture.msg_received = false;
 	global_fixture.loop = &f->loop;
 
-	f->leader.loop = &f->loop;
     PEER_SETUP(f->leader, 1, "127.0.0.1:9001");
 	global_fixture.leader_io = f->leader.io;
+    raft_uv_set_auto_recovery(&global_fixture.leader_io, false);                    \
 
-	f->follower.loop = &f->loop;
     PEER_SETUP(f->follower, 2, "127.0.0.1:9002");
 	global_fixture.follower_io = f->follower.io;
+    raft_uv_set_auto_recovery(&global_fixture.follower_io, false);                    \
 
 	pool_init(&global_fixture.pool, global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
 	global_fixture.pool.flags |= POOL_FOR_UT;
