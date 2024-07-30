@@ -432,7 +432,7 @@ struct test_fixture {
 	bool msg_received;
 
 	pool_t pool;
-	uv_loop_t *loop;
+	uv_loop_t loop;
 
 	/* TODO: should accomodate several background jobs in the future. Probably
 	 * by scheduling a barrier in the pool after all the works that toggles this
@@ -451,11 +451,14 @@ static __thread int thread_identifier;
 static void *pool_set_up(MUNIT_UNUSED const MunitParameter params[],
                    MUNIT_UNUSED void *user_data)
 {
+	int rv;
+
 	/* Prevent hangs. */
 	alarm(2);
 
-	global_fixture.loop = uv_default_loop();
-	pool_init(&global_fixture.pool, global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
+	rv = uv_loop_init(&global_fixture.loop);
+	munit_assert_int(rv, ==, 0);
+	pool_init(&global_fixture.pool, &global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
 	global_fixture.pool.flags |= POOL_FOR_UT;
 	thread_identifier = MAGIC_MAIN_THREAD;
 
@@ -470,14 +473,14 @@ static void pool_tear_down(void *data)
 
 static void progress(void) {
 	for (unsigned i = 0; i < 20; i++) {
-		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
+		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
 }
 
 static void wait_work(void) {
 	fprintf(stderr, "WAIT_WORK start\n");
 	while (!global_fixture.work_done) {
-		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
+		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
 	fprintf(stderr, "WAIT_WORK end\n");
 }
@@ -485,7 +488,7 @@ static void wait_work(void) {
 static void wait_msg_sent(void) {
 	fprintf(stderr, "WAIT_MSG start\n");
 	while (!global_fixture.msg_sent) {
-		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
+		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
 	fprintf(stderr, "WAIT_MSG end\n");
 }
@@ -493,7 +496,7 @@ static void wait_msg_sent(void) {
 static void wait_msg_received(void) {
 	fprintf(stderr, "WAIT_MSG recv start\n");
 	while (!global_fixture.msg_received) {
-		uv_run(global_fixture.loop, UV_RUN_NOWAIT);
+		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
 	fprintf(stderr, "WAIT_MSG recv end\n");
 }
@@ -522,7 +525,7 @@ static void pool_to_stop_op(struct timeout *to)
 static void pool_to_init_op(struct timeout *to)
 {
 	fprintf(stderr, "TIMER INIT\n");
-	uv_timer_init(global_fixture.loop, &to->handle);
+	uv_timer_init(&global_fixture.loop, &to->handle);
 }
 
 static void pool_work_queue_op(struct work *w, work_op work_cb, work_op after_cb)
@@ -619,7 +622,7 @@ int uv_sender_send_op(struct sender *s,
 	req = (uv_work_t) {
 		.data = &req_data,
 	};
-	uv_queue_work(global_fixture.loop, &req, uv_sender_send_cb, uv_sender_send_after_cb);
+	uv_queue_work(&global_fixture.loop, &req, uv_sender_send_cb, uv_sender_send_after_cb);
 	return 0;
 }
 
@@ -808,9 +811,9 @@ struct rft_fixture
         struct raft_io *_io = &peer.io;                         \
         int _rv;                                                   \
         _transport->version = 1;                                   \
-        _rv = raft_uv_tcp_init(_transport, global_fixture.loop);                 \
+        _rv = raft_uv_tcp_init(_transport, &global_fixture.loop);                 \
         munit_assert_int(_rv, ==, 0);                              \
-        _rv = raft_uv_init(_io, global_fixture.loop, f->dir, _transport);        \
+        _rv = raft_uv_init(_io, &global_fixture.loop, f->dir, _transport);        \
         munit_assert_int(_rv, ==, 0);                              \
         _rv = _io->init(_io, id, address);                         \
         munit_assert_int(_rv, ==, 0);                              \
@@ -831,7 +834,8 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 
 	struct rft_fixture *f = munit_malloc(sizeof *f);
     SET_UP_DIR;
-	global_fixture.loop = uv_default_loop();
+	rv = uv_loop_init(&global_fixture.loop);
+	munit_assert_int(rv, ==, 0);
 
 	global_fixture.msg_sent = false;
 	global_fixture.msg_received = false;
@@ -844,7 +848,7 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 	global_fixture.follower_io = f->follower.io;
     raft_uv_set_auto_recovery(&global_fixture.follower_io, false);                    \
 
-	pool_init(&global_fixture.pool, global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
+	pool_init(&global_fixture.pool, &global_fixture.loop, 4, POOL_QOS_PRIO_FAIR);
 	global_fixture.pool.flags |= POOL_FOR_UT;
 	thread_identifier = MAGIC_MAIN_THREAD;
 
@@ -955,7 +959,7 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	global_fixture.is_leader = false;
 	wait_msg_received();
 	msg = uv_get_msg_sent();
-	/* Address of the receving end, not the sender. */
+	/* Address of the sender. */
 	munit_assert_int(msg.server_id, ==, 1);
 	munit_assert_string_equal(msg.server_address, "127.0.0.1:9001");
 	ut_follower_message_received(follower, &msg);
