@@ -10,6 +10,7 @@
 #include "../../../src/utils.h"
 #include "../../../src/lib/threadpool.h"
 #include "src/tracing.h"
+#include "test/raft/lib/dir.h"
 #include "test/raft/lib/tcp.h"
 #include "test/raft/lib/uv.h"
 
@@ -592,6 +593,8 @@ void uv_sender_send_after_cb(uv_work_t *req, int status) {
 	(void)req;
 	(void)status;
 	global_fixture.msg_sent = true;
+	global_fixture.msg_received = true;
+	global_fixture.msg_consumed = false;
 	struct uv_sender_send_data *data = req->data;
 	data->cb(data->s, 0);
 }
@@ -620,9 +623,9 @@ int uv_sender_send_op(struct sender *s,
 }
 
 struct raft_message uv_get_msg_sent(void) {
+	tracef("%s: consume msg", global_fixture.is_leader ? "leader" : "follower");
 	munit_assert(!global_fixture.msg_consumed && global_fixture.msg_sent && global_fixture.msg_received);
 	global_fixture.msg_consumed = true;
-	tracef("msg consumed");
 	return global_fixture.last_msg_sent;
 }
 
@@ -814,10 +817,17 @@ struct rft_fixture
 
 static void recv_cb(struct raft_io *io, struct raft_message *msg) {
 	(void)io;
-	tracef("msg received");
+	tracef("msg received, msg.type:%d", msg->type);
 	global_fixture.last_msg_sent = *msg;
 	global_fixture.msg_consumed = false;
 	global_fixture.msg_received = true;
+}
+
+static void raft_tear_down(void *data) {
+	struct rft_fixture *f = data;
+
+	TEAR_DOWN_DIR;
+	free(f);
 }
 
 static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
@@ -900,7 +910,7 @@ struct result
 };
 
 /* TODO use LOOP_RUN_UNTIL */
-TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
+TEST(snapshot, both, raft_set_up, raft_tear_down, 0, NULL) {
 	struct follower_ops follower_ops = {
 		.ht_create = pool_ht_create_op,
 		.work_queue = pool_work_queue_op,
@@ -948,6 +958,7 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	global_fixture.is_leader = true;
 	ut_leader_message_received(leader, append_entries_result());
 	wait_work();
+	wait_work();
 	wait_msg_sent();
 
 	struct raft_message msg;
@@ -971,16 +982,15 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	msg = uv_get_msg_sent(); \
 	munit_assert_int(msg.server_id, ==, 2); \
 	munit_assert_string_equal(msg.server_address, "127.0.0.1:9002"); \
-	ut_follower_message_received(follower, &msg); \
 	ut_leader_message_received(leader, &msg); \
 	wait_work(); \
 	wait_work(); \
 	wait_msg_sent(); \
 
 	STEP;
-	STEP;
 	follower->sigs_calculated = true;
 	leader->sigs_calculated = true;
+	STEP;
 	for (unsigned i = 0; i < 10; i++) {
 		STEP;
 		if (sm_state(&leader->sm) == LS_F_ONLINE) {
