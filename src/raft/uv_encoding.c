@@ -93,7 +93,7 @@ static size_t size_install_snapshot_result(void)
 
 static size_t size_signature(const struct raft_signature *s)
 {
-	return strlen(s->db) + /* DB name. */
+	return strlen(s->db) + 1 + /* DB name. */
 		sizeof(pageno_t) * 2 + /* Page range (from, to). */
 		sizeof(uint8_t) + /* Ask calculated. */
 		sizeof(uint32_t); /* Result. */
@@ -244,11 +244,6 @@ static void encode_install_snapshot_result(const struct raft_install_snapshot_re
 {
 	void *cursor = buf;
 
-	// TODO.
-	(void)cursor;
-	(void)m;
-	return;
-
 	bytePut32(&cursor, m->result);
 }
 
@@ -257,15 +252,10 @@ static void encode_signature(const struct raft_signature *m,
 {
 	void *cursor = buf;
 
-	// TODO.
-	(void)cursor;
-	(void)m;
-	return;
-
-	bytePutString(cursor, m->db);
-	bytePut64(cursor, m->page_from_to.from);
-	bytePut64(cursor, m->page_from_to.to);
-	bytePut8(cursor, m->ask_calculated);
+	bytePutString(&cursor, m->db);
+	bytePut32(&cursor, m->page_from_to.from);
+	bytePut32(&cursor, m->page_from_to.to);
+	bytePut8(&cursor, m->ask_calculated);
 	bytePut32(&cursor, m->result);
 }
 
@@ -727,6 +717,10 @@ static void decode_signature(const uv_buf_t *buf,
 	const void *cursor = buf->base;
 
 	p->version = 0;
+	p->db = byteGetString(&cursor, 100 /* TODO */);
+	p->page_from_to.from = byteGet32(&cursor);
+	p->page_from_to.to = byteGet32(&cursor);
+	p->ask_calculated = byteGet8(&cursor);
 	p->result = byteGet32(&cursor);
 }
 

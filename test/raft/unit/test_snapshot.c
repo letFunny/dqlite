@@ -9,6 +9,7 @@
 #include "../../../src/raft/recv_install_snapshot.h"
 #include "../../../src/utils.h"
 #include "../../../src/lib/threadpool.h"
+#include "src/tracing.h"
 #include "test/raft/lib/tcp.h"
 #include "test/raft/lib/uv.h"
 
@@ -430,6 +431,7 @@ struct test_fixture {
 	struct raft_message last_msg_sent;
 	bool msg_sent;
 	bool msg_received;
+	bool msg_consumed;
 
 	pool_t pool;
 	uv_loop_t loop;
@@ -478,27 +480,21 @@ static void progress(void) {
 }
 
 static void wait_work(void) {
-	fprintf(stderr, "WAIT_WORK start\n");
 	while (!global_fixture.work_done) {
 		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
-	fprintf(stderr, "WAIT_WORK end\n");
 }
 
 static void wait_msg_sent(void) {
-	fprintf(stderr, "WAIT_MSG start\n");
 	while (!global_fixture.msg_sent) {
 		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
-	fprintf(stderr, "WAIT_MSG end\n");
 }
 
 static void wait_msg_received(void) {
-	fprintf(stderr, "WAIT_MSG recv start\n");
 	while (!global_fixture.msg_received) {
 		uv_run(&global_fixture.loop, UV_RUN_NOWAIT);
 	}
-	fprintf(stderr, "WAIT_MSG recv end\n");
 }
 
 /* Decorates the callback used when the pool work is done to set the test
@@ -510,21 +506,18 @@ static void test_fixture_work_cb(pool_work_t *w) {
 
 static void pool_to_start_op(struct timeout *to, unsigned delay, to_cb_op cb)
 {
-	fprintf(stderr, "TIMER START\n");
 	uv_timer_start(&to->handle, cb, delay, 0);
 	to->cb = cb;
 }
 
 static void pool_to_stop_op(struct timeout *to)
 {
-	fprintf(stderr, "TIMER STOP\n");
 	uv_timer_stop(&to->handle);
 	// TODO uv_close((uv_handle_t*)&to->handle, NULL);
 }
 
 static void pool_to_init_op(struct timeout *to)
 {
-	fprintf(stderr, "TIMER INIT\n");
 	uv_timer_init(&global_fixture.loop, &to->handle);
 }
 
@@ -627,9 +620,9 @@ int uv_sender_send_op(struct sender *s,
 }
 
 struct raft_message uv_get_msg_sent(void) {
-	munit_assert(global_fixture.msg_sent);
-	global_fixture.msg_sent = false;
-	global_fixture.msg_received = false;
+	munit_assert(!global_fixture.msg_consumed && global_fixture.msg_sent && global_fixture.msg_received);
+	global_fixture.msg_consumed = true;
+	tracef("msg consumed");
 	return global_fixture.last_msg_sent;
 }
 
@@ -821,8 +814,9 @@ struct rft_fixture
 
 static void recv_cb(struct raft_io *io, struct raft_message *msg) {
 	(void)io;
-	fprintf(stderr, "RECV, msg.type:%d, msg.server_address:%s, is_leader:%d\n", msg->type, msg->server_address, global_fixture.is_leader);
+	tracef("msg received");
 	global_fixture.last_msg_sent = *msg;
+	global_fixture.msg_consumed = false;
 	global_fixture.msg_received = true;
 }
 
@@ -839,6 +833,7 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 
 	global_fixture.msg_sent = false;
 	global_fixture.msg_received = false;
+	global_fixture.msg_consumed = false;
 
     PEER_SETUP(f->leader, 1, "127.0.0.1:9001");
 	global_fixture.leader_io = f->leader.io;
@@ -862,10 +857,10 @@ static void *raft_set_up(MUNIT_UNUSED const MunitParameter params[],
 void raft_sender_send_after_cb(struct raft_io_send *req, int status) {
 	munit_assert_int(status, ==, 0);
 
-	fprintf(stderr, "AFTER SENT, is_leader:%d\n", global_fixture.is_leader);
-	global_fixture.msg_sent = true;
 	struct uv_sender_send_data *data = req->data;
 	data->cb(data->s, status);
+	tracef("msg sent");
+	global_fixture.msg_sent = true;
 }
 
 int raft_sender_send_op(struct sender *s,
@@ -892,9 +887,9 @@ int raft_sender_send_op(struct sender *s,
 		io = &global_fixture.follower_io;
 	}
 
+	tracef("queue msg for sending, msg_type: %d", msg->type);
 	int rv = io->send(io, &req, msg, raft_sender_send_after_cb);
 	munit_assert_int(rv, ==, 0);
-	fprintf(stderr, "SENT, msg.type:%d, msg.address:%s, is_leader:%d\n", msg->type, msg->server_address, global_fixture.is_leader);
 	return 0;
 }
 
@@ -920,6 +915,8 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 
 	*follower = (struct follower) {
 		.ops = &follower_ops,
+
+		.db_name = "test-db",
 	};
 
 	sm_init(&follower->sm, follower_sm_invariant,
@@ -939,6 +936,7 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	*leader = (struct leader) {
 		.ops = &leader_ops,
 
+		.db_name = "test-db",
 		.sigs_more = false,
 		.pages_more = false,
 		.sigs_calculated = false,
@@ -947,8 +945,6 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	sm_init(&leader->sm, leader_sm_invariant,
 		NULL, leader_sm_conf, "leader", LS_F_ONLINE);
 
-	// TODO sm_relate(&leader->sm, &follower->sm);
-
 	global_fixture.is_leader = true;
 	ut_leader_message_received(leader, append_entries_result());
 	wait_work();
@@ -956,35 +952,15 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 
 	struct raft_message msg;
 
-	global_fixture.is_leader = false;
-	wait_msg_received();
-	msg = uv_get_msg_sent();
-	/* Address of the sender. */
-	munit_assert_int(msg.server_id, ==, 1);
-	munit_assert_string_equal(msg.server_address, "127.0.0.1:9001");
-	ut_follower_message_received(follower, &msg);
-	wait_work();
-	wait_work();
-	fprintf(stderr, "BEFORE ERR\n");
-	wait_msg_sent();
-
-	global_fixture.is_leader = true;
-	wait_msg_received();
-	msg = uv_get_msg_sent();
-	munit_assert_int(msg.server_id, ==, 2);
-	munit_assert_string_equal(msg.server_address, "127.0.0.1:9002");
-	ut_leader_message_received(leader, &msg);
-	wait_work();
-	wait_work();
-	wait_msg_sent();
-
 	// TODO pass messages to one or the other depending on address? It will be
 	// more dynamic.
 #define STEP \
 	global_fixture.is_leader = false; \
 	wait_msg_received(); \
 	msg = uv_get_msg_sent(); \
+	/* Address of the sender. */ \
 	munit_assert_int(msg.server_id, ==, 1); \
+	munit_assert_string_equal(msg.server_address, "127.0.0.1:9001"); \
 	ut_follower_message_received(follower, &msg); \
 	wait_work(); \
 	wait_work(); \
@@ -994,19 +970,23 @@ TEST(snapshot, both, raft_set_up, pool_tear_down, 0, NULL) {
 	wait_msg_received(); \
 	msg = uv_get_msg_sent(); \
 	munit_assert_int(msg.server_id, ==, 2); \
+	munit_assert_string_equal(msg.server_address, "127.0.0.1:9002"); \
+	ut_follower_message_received(follower, &msg); \
 	ut_leader_message_received(leader, &msg); \
 	wait_work(); \
 	wait_work(); \
 	wait_msg_sent(); \
 
-	// uv_print_active_handles(global_fixture.loop, stderr);
-	// fprintf(stderr, "------\n");
-
+	STEP;
 	STEP;
 	follower->sigs_calculated = true;
 	leader->sigs_calculated = true;
 	for (unsigned i = 0; i < 10; i++) {
 		STEP;
+		if (sm_state(&leader->sm) == LS_F_ONLINE) {
+			// Iteration finished.
+			break;
+		};
 	}
 
 	return MUNIT_OK;

@@ -671,6 +671,9 @@ static void rpc_fill_leader(struct leader *leader)
 	case LS_PAGE_READ:
 		rpc->message = (struct raft_message) {
 			.type = RAFT_IO_INSTALL_SNAPSHOT_CP, // TODO CP OR MV.
+			.install_snapshot_cp = (struct raft_install_snapshot_cp) {
+				.db = leader->db_name,
+			}
 		};
 		break;
 	case LS_SNAP_DONE:
@@ -689,17 +692,23 @@ static void rpc_fill_leader(struct leader *leader)
 	case LS_REQ_SIG_LOOP:
 		rpc->message = (struct raft_message) {
 			.type = RAFT_IO_SIGNATURE,
+			.signature = (struct raft_signature) {
+				.db = leader->db_name,
+				.ask_calculated = true,
+			},
 		};
 		break;
 	case LS_CHECK_F_HAS_SIGS:
 		rpc->message = (struct raft_message) {
 			.type = RAFT_IO_SIGNATURE,
 			.signature = (struct raft_signature) {
+				.db = leader->db_name,
 				.ask_calculated = true,
 			},
 		};
 		break;
 	}
+	// TODO.
 	rpc->message.server_id = 2;
 	rpc->message.server_address = "127.0.0.1:9002";
 
@@ -718,6 +727,7 @@ static void rpc_fill_follower(struct follower *follower)
 		rpc->message = (struct raft_message) {
 			.type = RAFT_IO_SIGNATURE_RESULT,
 			.signature_result = (struct raft_signature_result) {
+				.db = follower->db_name,
 				.calculated = follower->sigs_calculated,
 			},
 		};
@@ -725,6 +735,10 @@ static void rpc_fill_follower(struct follower *follower)
 	case FS_SIG_READ:
 		rpc->message = (struct raft_message) {
 			.type = RAFT_IO_SIGNATURE_RESULT,
+			.signature_result = (struct raft_signature_result) {
+				.db = follower->db_name,
+				.calculated = follower->sigs_calculated,
+			},
 		};
 		break;
 	case FS_CHUNCK_APPLIED:
@@ -739,6 +753,7 @@ static void rpc_fill_follower(struct follower *follower)
 		};
 		break;
 	}
+	// TODO.
 	rpc->message.server_id = 1;
 	rpc->message.server_address = "127.0.0.1:9001";
 
@@ -878,10 +893,13 @@ __attribute__((unused)) void leader_tick(struct leader *leader, const struct raf
 	PRE(ops->is_main_thread());
 
 	if (!is_a_trigger_leader(leader, incoming) ||
-	    is_a_duplicate(leader, incoming))
+	    is_a_duplicate(leader, incoming)) {
+		tracef("incoming message ignored");
 		return;
+	}
 
 	if (is_an_unexpected_trigger(leader, incoming)) {
+		tracef("unexpected message, msg.type: %d", incoming->type);
 		leader_reset(leader);
 		return;
 	}
@@ -951,8 +969,15 @@ __attribute__((unused)) void follower_tick(struct follower *follower, const stru
 	const struct follower_ops *ops = follower->ops;
 
 	if (!is_a_trigger_follower(follower, incoming) ||
-	    is_a_duplicate(follower, incoming))
+	    is_a_duplicate(follower, incoming)) {
+		// TODO use IN.
+		if ((uint64_t)incoming <= 3) {
+			tracef("incoming message ignored, msg: %ld\n", (uint64_t)incoming);
+		} else {
+			tracef("incoming message ignored, msg.type: %d\n", incoming->type);
+		}
 		return;
+	}
 
 	PRE(ops->is_main_thread());
 

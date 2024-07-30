@@ -85,6 +85,7 @@ struct leader {
 	bool sigs_calculated;
 	bool sigs_more;
 	bool pages_more;
+	char *db_name;
 };
 
 struct follower {
@@ -96,6 +97,7 @@ struct follower {
 
 	/* TODO dummy flags */
 	bool sigs_calculated;
+	char *db_name;
 };
 
 void leader_tick(struct leader *leader, const struct raft_message *incoming);
