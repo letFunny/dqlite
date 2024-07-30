@@ -692,7 +692,6 @@ TEST(snapshot_leader, pool_timeouts, pool_set_up, pool_tear_down, 0, NULL) {
 	ut_leader_message_received(leader, ut_sign_result());
 
 	wait_work();
-	wait_work();
 
 	PRE(sm_state(&leader->sm) == LS_PAGE_READ);
 	wait_msg_sent();
@@ -958,7 +957,6 @@ TEST(snapshot, both, raft_set_up, raft_tear_down, 0, NULL) {
 	global_fixture.is_leader = true;
 	ut_leader_message_received(leader, append_entries_result());
 	wait_work();
-	wait_work();
 	wait_msg_sent();
 
 	struct raft_message msg;
@@ -974,7 +972,6 @@ TEST(snapshot, both, raft_set_up, raft_tear_down, 0, NULL) {
 	munit_assert_string_equal(msg.server_address, "127.0.0.1:9001"); \
 	ut_follower_message_received(follower, &msg); \
 	wait_work(); \
-	wait_work(); \
 	wait_msg_sent(); \
 \
 	global_fixture.is_leader = true; \
@@ -983,7 +980,6 @@ TEST(snapshot, both, raft_set_up, raft_tear_down, 0, NULL) {
 	munit_assert_int(msg.server_id, ==, 2); \
 	munit_assert_string_equal(msg.server_address, "127.0.0.1:9002"); \
 	ut_leader_message_received(leader, &msg); \
-	wait_work(); \
 	wait_work(); \
 	wait_msg_sent(); \
 
